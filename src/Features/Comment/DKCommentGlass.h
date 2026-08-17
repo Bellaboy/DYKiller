@@ -22,6 +22,10 @@ UIView *DKCommentGlassCurrentSlot(void);
 /// 它的尺寸由抖音在常驻态与回复态之间来回改，探针据此核对玻璃有没有跟上。
 UIView *DKCommentGlassCurrentField(void);
 
+/// 本次会话拦下「不透明绘制优化」网关的次数。恒为 0 说明抖音没走这个网关——
+/// 那就要靠探针的「残留面板底色」判断面板有没有被刷上底色。
+NSUInteger DKCommentGlassRenderOptimizeBlocks(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -152,6 +152,13 @@
 @interface AWEListKitMagicCollectionView : UICollectionView
 @end
 
+// 评论区「不透明绘制优化」的 AB 网关（class-dump 自 39.9.0 的 AwemeCore，纯 ObjC 类）。
+// 热更新翻的是实验位 AWERenderingOptimize4；打开后抖音把面板底色写进列表容器与每一个
+// UIKit 文字视图的 backgroundColor。参数是抖音自己的上下文，本项目不解读。
+@interface AWECommentABTestSettings : NSObject
++ (BOOL)enableCommentRenderingOptimize:(id)context;
+@end
+
 @interface AWECommentInputBackgroundView : UIView                   // 详情页底部输入栏，是 AWECommentInputViewController 的根视图
 @end
 

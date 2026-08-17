@@ -257,6 +257,57 @@ static void DKProbeAppendWindows(NSMutableString *out) {
     [out appendFormat:@"%@\n", DKCommentLoopResumeStats()];
 }
 
+// 面板底色 = 槽位子树里**广度优先**第一个「满幅 + 不透明」的底色，**隐藏的也算**：抖音把它写在
+// 头部关闭栏 / 时间提示栏那两块常年 alpha=0 的底板上，24 份导出（含未热更的）全都有，
+// 是跨版本最稳的取色点。必须广度优先——深度优先会先撞进列表，取到里面那块与面板无关的满幅垫层。
+//
+// 这段判据只服务诊断：功能侧靠 AB 网关在源头关掉不透明绘制，不需要认底色。留在这里是为了
+// 抖音改了网关方法名时，「残留面板底色」能立刻从 0 变成正数。
+static UIColor *DKProbePanelBaseColor(UIView *slot) {
+    NSMutableArray<UIView *> *level = [NSMutableArray arrayWithObject:slot];
+    CGFloat width = CGRectGetWidth(slot.bounds);
+    for (NSUInteger depth = 0; depth <= 14 && level.count > 0; depth++) {
+        NSMutableArray<UIView *> *next = [NSMutableArray array];
+        for (UIView *node in level) {
+            UIColor *color = node.backgroundColor;
+            if (node != slot && color && CGColorGetAlpha(color.CGColor) >= 0.99
+                && fabs(CGRectGetWidth(node.bounds) - width) <= 1.0
+                && CGRectGetHeight(node.bounds) >= 8.0) {
+                return color;
+            }
+            for (UIView *sub in node.subviews) {
+                if (![sub isKindOfClass:UIVisualEffectView.class]) [next addObject:sub];
+            }
+        }
+        level = next;
+    }
+    return nil;
+}
+
+// 槽位子树里还剩多少块面板底色会盖住玻璃。热更新的不透明绘制把它刷进列表容器和每一个 UIKit
+// 文字视图，网关拦住了这里就是 0——这一行是「文字带底色块 / 整块面板变色」的唯一判据。
+// 只数等于面板底色的：徽章、tab 下划线这些自带彩色的不透明底本来就该留着。
+// 面板底色没认出来（base 为 nil）时退化成数全部可见的不透明底色，好分辨是哪一种失败。
+static BOOL DKProbeColorMatches(UIColor *color, UIColor *base) {
+    CGFloat r1 = 0.0, g1 = 0.0, b1 = 0.0, a1 = 0.0, r2 = 0.0, g2 = 0.0, b2 = 0.0, a2 = 0.0;
+    if (![color getRed:&r1 green:&g1 blue:&b1 alpha:&a1]) return NO;
+    if (![base getRed:&r2 green:&g2 blue:&b2 alpha:&a2]) return NO;
+    return fabs(r1 - r2) <= 1.0 / 255.0 && fabs(g1 - g2) <= 1.0 / 255.0 && fabs(b1 - b2) <= 1.0 / 255.0;
+}
+
+static void DKProbeCollectCovers(UIView *view, UIColor *base, NSMutableArray<UIView *> *out) {
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:UIVisualEffectView.class]) continue;
+        if (sub.hidden || sub.alpha < 0.01) continue;
+        UIColor *color = sub.backgroundColor;
+        if (color && CGColorGetAlpha(color.CGColor) >= 0.99
+            && (!base || DKProbeColorMatches(color, base))) {
+            [out addObject:sub];
+        }
+        DKProbeCollectCovers(sub, base, out);
+    }
+}
+
 // 评论面板玻璃：验收配置目标、公开属性、flex 交互、场景 trait 与有效圆角。
 // 只检查槽位现有子树，不访问 glass.contentView。
 static void DKProbeAppendCommentGlass(NSMutableString *out) {
@@ -281,6 +332,23 @@ static void DKProbeAppendCommentGlass(NSMutableString *out) {
      DKProbeStyleName(scene.traitCollection.userInterfaceStyle),
      DKProbeStyleName(slot.window.overrideUserInterfaceStyle),
      DKProbeStyleName(slot.traitCollection.userInterfaceStyle)];
+
+    UIColor *base = DKProbePanelBaseColor(slot);
+    [out appendFormat:@"  面板底色           = %@\n", DKProbeColorDesc(base)];
+    [out appendFormat:@"  绘制优化网关       = 已拦截 %lu 次%@\n",
+     (unsigned long)DKCommentGlassRenderOptimizeBlocks(),
+     DKCommentGlassRenderOptimizeBlocks() == 0 ? @"（抖音没走这个网关，看下面的残留判断有没有被刷色）" : @""];
+
+    NSMutableArray<UIView *> *covers = [NSMutableArray array];
+    DKProbeCollectCovers(slot, base, covers);
+    [out appendFormat:@"  残留面板底色       = %lu 处%@\n", (unsigned long)covers.count,
+     base ? @"" : @"（面板底色没认出来，这里是全部可见不透明底色）"];
+    for (NSUInteger i = 0; i < covers.count && i < 5; i++) {
+        UIView *cover = covers[i];
+        [out appendFormat:@"    %@ frame=%@ bg=%@\n",
+         DKProbeDesc(cover), NSStringFromCGRect(cover.frame),
+         DKProbeColorDesc(cover.backgroundColor)];
+    }
 
     UIView *first = slot.subviews.firstObject;
     [out appendFormat:@"  最底层子视图       = %@（共 %lu 个）\n",

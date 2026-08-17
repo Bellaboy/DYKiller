@@ -38,6 +38,9 @@ static NSString *gLastResumeTrace = nil;
 // 在屏的全屏容器。用弱引用而不是计数：交互式返回中途取消会再发一次 viewDidAppear:
 // 而没有配对的 viewWillDisappear:，计数会一去不回。
 static __weak UIViewController *gFullPanel = nil;
+// 底色拦截的总闸，与 kDKBackdropPageKey 同生共死。用纯 BOOL 而不是读 gFullPanel：
+// 后者是 __weak，取值要走 objc_loadWeakRetained，全局钩子里付不起这个开销。
+static BOOL gBackdropAttached = NO;
 
 NSString *DKCommentPiPGateStats(void) {
     return [NSString stringWithFormat:@"内嵌画中画闸门已关=%lu 次", (unsigned long)gPiPGateHits];
@@ -80,11 +83,13 @@ static void DKAttachBackdrop(UIViewController *panel) {
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     panelView.backgroundColor = UIColor.clearColor;
     panelView.opaque = NO;
+    gBackdropAttached = YES;
 }
 
 static void DKDetachBackdrop(UIViewController *panel) {
     UIView *page = objc_getAssociatedObject(panel, &kDKBackdropPageKey);
     if (!page) return;
+    gBackdropAttached = NO;
 
     UIView *panelView = panel.viewIfLoaded;
     id baseline = objc_getAssociatedObject(panelView, &kDKPanelColorKey);
@@ -101,6 +106,29 @@ static void DKDetachBackdrop(UIViewController *panel) {
     objc_setAssociatedObject(panel, &kDKBackdropPageKey, nil,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
+
+// 垫层期间钉住全屏容器的底色。切深浅色时抖音会把它重新刷成不透明黑，那块黑正好垫在玻璃与
+// 视频页之间，观感是「玻璃材质丢了、只剩声音」；而容器 bounds 没变、布局回调不跑，
+// 事后没有任何时机收得回来，只能在写入处按平。
+//
+// 实测（0.5.6-beta1 两份导出，同一个容器 view）：bg 从 rgba(0,0,0,0) 变成 rgba(0,0,0,1)，
+// opaque 没被动过——写入走的就是这个 setter。
+//
+// 判据按开销从小到大短路：没进全屏评论区时只多一次 BOOL 取值。
+%hook UIView
+
+- (void)setBackgroundColor:(UIColor *)color {
+    if (gBackdropAttached && color && CGColorGetAlpha(color.CGColor) >= 0.99
+        && objc_getAssociatedObject(self, &kDKPanelColorKey)) {
+        // 记下最新的主题色：摘除时才还得回当前外观那一份，而不是进场时那一份。
+        objc_setAssociatedObject(self, &kDKPanelColorKey, color, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        %orig(UIColor.clearColor);
+        return;
+    }
+    %orig;
+}
+
+%end
 
 %hook AWECommentFullScreenContainerViewController
 

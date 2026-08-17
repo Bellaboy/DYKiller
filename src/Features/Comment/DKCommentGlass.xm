@@ -21,6 +21,9 @@
 //    盖住输入区——输入栏底色槽只清成透明让它透上来，不再单独挂一块玻璃。
 //    输入框保持独立胶囊，不使用 UIGlassContainerEffect（嵌套会被合并成同一形状）。
 //
+//  · 热更新的「不透明绘制优化」从抖音自己的 AB 网关关掉，等于把收到热更新的设备退回没收到的
+//    那个状态。不碰文字颜色、字形、图层与 opaque。
+//
 //  · 深浅色从 UIWindowScene 的 trait 取：抖音把 window override 钉死为浅色。
 //  · interactive 恒为 YES；玻璃不参与 hit-test，触摸源重定向到对应槽位及其子树。
 //  · 主面板若已有其他插件的 effect view，整项让行，只移除自身创建的视图。
@@ -55,9 +58,8 @@ static const NSTimeInterval kDKGlassAnimationDuration = 0.25;
 
 static char kSlotOriginalColorKey;     // 槽位：抖音写的底色
 static char kSlotGlassKey;             // 槽位：我们插的玻璃层
-static char kCoverOriginalColorKey;    // 满幅遮盖层：抖音写的底色
+static char kCoverOriginalColorKey;    // 遮盖层：抖音写的底色
 static char kGlassClearModeKey;         // 玻璃：当前 effect 是否按 Clear 构造
-static char kGlassStyleKey;             // 玻璃：当前 effect 对应的场景外观
 static char kGlassMaterializingKey;     // 玻璃：已排入 materialize，防止重复排队
 
 // 本次会话是否接管过槽位。开关一直关着的用户不必为每帧的查找与还原付出代价。
@@ -68,6 +70,8 @@ static NSHashTable *gGlassCarriers = nil;
 static NSHashTable *gClearedCovers = nil;
 // 已挂上深浅色监听的场景，避免重复注册。
 static __weak UIWindowScene *gObservedScene = nil;
+// 拦下「不透明绘制优化」网关的次数，只给调试探针读。
+static NSUInteger gRenderOptimizeBlocks = 0;
 // 最近接管的面板槽位与输入框槽位，只给调试探针读。
 static __weak UIView *gLastPanelSlot = nil;
 static __weak UIView *gLastFieldSlot = nil;
@@ -78,6 +82,10 @@ UIView *DKCommentGlassCurrentSlot(void) {
 
 UIView *DKCommentGlassCurrentField(void) {
     return gLastFieldSlot;
+}
+
+NSUInteger DKCommentGlassRenderOptimizeBlocks(void) {
+    return gRenderOptimizeBlocks;
 }
 
 #pragma mark - 小工具
@@ -157,51 +165,52 @@ static void DKRunGlassAnimation(UIViewController *controller, BOOL animated, voi
                      completion:nil];
 }
 
-static void DKInstallGlassEffect(UIVisualEffectView *glass, UIGlassEffect *effect,
-                                 BOOL clear, UIUserInterfaceStyle style)
+static void DKInstallGlassEffect(UIVisualEffectView *glass, UIGlassEffect *effect, BOOL clear)
     API_AVAILABLE(ios(26.0)) {
     glass.effect = effect;
     objc_setAssociatedObject(glass, &kGlassClearModeKey, @(clear), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    objc_setAssociatedObject(glass, &kGlassStyleKey, @(style), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+// 判据只看真正进入 effect 的三样：Regular/Clear 档位、tint、interactive。**场景外观不在其中**
+// ——Regular 的 tint 恒为 nil，换外观时 DKMakeCommentGlassEffect 造出来的 effect 与在用的
+// 逐字段相同，0.5.5 把外观也算进判据，于是每次切深浅色都拿一份一模一样的 effect 去换掉活着的
+// 材质。外观现在只走 overrideUserInterfaceStyle。纯粹是省掉一次无谓的材质重建：
+// 「换 effect 会打死材质」在 iOS 26.5 模拟器上没能复现（探针见
+// debug/details/0.5.6/glass-restyle-probe/，swap / override / reparent 三条路径读数一致），
+// 全屏切外观那条最后查明是全屏容器底色被重刷，与材质无关。
 static BOOL DKGlassNeedsAppearance(UIVisualEffectView *glass, BOOL clear, UIUserInterfaceStyle style)
     API_AVAILABLE(ios(26.0)) {
-    if (glass.overrideUserInterfaceStyle != DKGlassOverrideStyle(clear, style)) return YES;
-
     UIGlassEffect *current = [glass.effect isKindOfClass:UIGlassEffect.class]
         ? (UIGlassEffect *)glass.effect : nil;
     if (!current) return glass.effect != nil;
 
     NSNumber *installedClear = objc_getAssociatedObject(glass, &kGlassClearModeKey);
-    NSNumber *installedStyle = objc_getAssociatedObject(glass, &kGlassStyleKey);
     if (!installedClear || installedClear.boolValue != clear) return YES;
-    if (!installedStyle || installedStyle.integerValue != style) return YES;
     if (!current.interactive) return YES;
     return !DKColorsEqual(current.tintColor, DKCommentGlassTint(clear, style));
 }
 
-// 外观、Regular/Clear 档位或 tint 不变时不重建 effect，避免布局回调打断动画。
+// 外观切换只改 overrideUserInterfaceStyle；只有 Regular/Clear 档位或 tint 真的变了才重建 effect。
 static void DKApplyGlassStyle(UIUserInterfaceStyle style, BOOL animated) API_AVAILABLE(ios(26.0)) {
     if (style == UIUserInterfaceStyleUnspecified) return;
     gGlassStyle = style;
 
     BOOL clear = DKCommentGlassUsesClearMaterial();
     NSArray<UIVisualEffectView *> *carriers = gGlassCarriers.allObjects;
-    BOOL needsUpdate = NO;
+    UIUserInterfaceStyle override = DKGlassOverrideStyle(clear, style);
+
+    NSMutableArray<UIVisualEffectView *> *restyle = [NSMutableArray array];
     for (UIVisualEffectView *glass in carriers) {
-        if (DKGlassNeedsAppearance(glass, clear, style)) {
-            needsUpdate = YES;
-            break;
+        if (glass.overrideUserInterfaceStyle != override) {
+            glass.overrideUserInterfaceStyle = override;
         }
+        if (glass.effect && DKGlassNeedsAppearance(glass, clear, style)) [restyle addObject:glass];
     }
-    if (!needsUpdate) return;
+    if (restyle.count == 0) return;
 
     DKRunGlassAnimation(nil, animated, ^{
-        for (UIVisualEffectView *glass in carriers) {
-            glass.overrideUserInterfaceStyle = DKGlassOverrideStyle(clear, style);
-            if (!glass.effect || !DKGlassNeedsAppearance(glass, clear, style)) continue;
-            DKInstallGlassEffect(glass, DKMakeCommentGlassEffect(clear, style), clear, style);
+        for (UIVisualEffectView *glass in restyle) {
+            DKInstallGlassEffect(glass, DKMakeCommentGlassEffect(clear, style), clear);
         }
     });
 }
@@ -330,7 +339,7 @@ static void DKMaterializeGlass(UIVisualEffectView *glass, UIViewController *cont
         if (style == UIUserInterfaceStyleUnspecified) style = DKGlassStyleForView(glass);
         BOOL clear = DKCommentGlassUsesClearMaterial();
         glass.overrideUserInterfaceStyle = DKGlassOverrideStyle(clear, style);
-        DKInstallGlassEffect(glass, DKMakeCommentGlassEffect(clear, style), clear, style);
+        DKInstallGlassEffect(glass, DKMakeCommentGlassEffect(clear, style), clear);
         objc_setAssociatedObject(glass, &kGlassMaterializingKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     });
 }
@@ -351,7 +360,16 @@ static BOOL DKClearSlotColor(UIView *slot) {
     return YES;
 }
 
-// 主面板列表若被涂成不透明色，会盖住垫在最底层的玻璃。只动满幅容器，不动文字/按钮/图片。
+// 铺满槽位的不透明容器会盖住垫在最底层的玻璃。只动满幅容器，不动文字/按钮/图片。
+//
+// 热更新那一套「不透明绘制优化」刷出来的底色**不归这里管**，由 AB 网关在源头关掉
+// （见文件末尾 DKCommentRenderOptimizeHook）。beta1 曾在这里加过一整套按面板底色匹配、
+// 连 UILabel 一起清的逻辑，热更设备 8 份导出实测**一次都没触发过**（网关挡住了绘制，
+// 列表与 label 根本没被刷色），已整层删除。
+//
+// 这条结构判据仍然要留：未热更设备上抖音会在列表内容底边放一块满幅不透明垫底块
+// （实测 428×200 纯黑、无子视图，挂在 clipsToBounds 的 tab 内容列表里），
+// 不清的话往下拉过头会露出一条黑带，与热更新无关，网关管不到。
 static const NSUInteger kDKCoverWalkDepth = 14;
 static const CGFloat kDKCoverMinHeight = 8.0;
 
@@ -360,13 +378,12 @@ static BOOL DKIsCoverCandidate(UIView *view, UIView *slot) {
     if (view.hidden || view.alpha < 0.01) return NO;
     if ([view isKindOfClass:UILabel.class]
         || [view isKindOfClass:UIControl.class]
-        || [view isKindOfClass:UIImageView.class]
-        || [view isKindOfClass:UIVisualEffectView.class]) {
+        || [view isKindOfClass:UIImageView.class]) {
         return NO;
     }
+    if (!DKColorIsOpaque(view.backgroundColor)) return NO;
     if (fabs(CGRectGetWidth(view.bounds) - CGRectGetWidth(slot.bounds)) > 1.0) return NO;
-    if (CGRectGetHeight(view.bounds) < kDKCoverMinHeight) return NO;
-    return YES;
+    return CGRectGetHeight(view.bounds) >= kDKCoverMinHeight;
 }
 
 static void DKClearCoverColor(UIView *view) {
@@ -384,7 +401,7 @@ static void DKClearCoverColor(UIView *view) {
 static void DKWalkClearCovers(UIView *view, UIView *slot, NSUInteger depth) {
     if (depth > kDKCoverWalkDepth) return;
     for (UIView *sub in view.subviews) {
-        if ([sub isKindOfClass:DKGlassFlexView.class]) continue;
+        if ([sub isKindOfClass:UIVisualEffectView.class]) continue;
         if (DKIsCoverCandidate(sub, slot)) DKClearCoverColor(sub);
         if ([sub isKindOfClass:UILabel.class] || [sub isKindOfClass:UIImageView.class]) continue;
         DKWalkClearCovers(sub, slot, depth + 1);
@@ -570,6 +587,30 @@ static void DKCommentGlassSync(UIViewController *controller) API_AVAILABLE(ios(2
 
 %end
 
+// 热更新（AB 实验位 AWERenderingOptimize4）打开的评论区「不透明绘制优化」：抖音把面板底色写进
+// 列表容器与每一个 UIKit 文字视图的 backgroundColor。原版不透明面板上它们与面板同色、完全
+// 看不见，玻璃一挂就是「文字带底色块 + 整块面板变色」。从这个网关关掉，等于把收到热更新的设备
+// 退回没收到的那个状态——那个状态的渲染已由未热更设备的四份导出验证正确。
+//
+// 这是热更设备唯一的防线：beta1 曾同时上过一套按面板底色的清扫，8 份导出实测一次都没触发过
+// （网关挡在绘制之前），已删。抖音改名或删掉这个方法时本组不安装，观感退回热更原样——
+// 探针的「残留面板底色」会立刻从 0 变正数，据此判断要不要把那一层捡回来。
+%group DKCommentRenderOptimizeHook
+
+%hook AWECommentABTestSettings
+
++ (BOOL)enableCommentRenderingOptimize:(id)context {
+    if (DKCommentGlassEnabled()) {
+        gRenderOptimizeBlocks++;
+        return NO;
+    }
+    return %orig;
+}
+
+%end
+
+%end
+
 #pragma mark - 设置项注册
 
 %ctor {
@@ -608,5 +649,12 @@ static void DKCommentGlassSync(UIViewController *controller) API_AVAILABLE(ios(2
 
     if (DKGlassOSAvailable()) {
         %init(DKCommentGlassHooks);
+
+        // 类或方法任一不在就不装：内部 generator 对不存在的方法会「新增」而不是「钩住」，
+        // 那样 %orig 会调进空实现。
+        Class abTest = NSClassFromString(@"AWECommentABTestSettings");
+        if ([abTest respondsToSelector:@selector(enableCommentRenderingOptimize:)]) {
+            %init(DKCommentRenderOptimizeHook);
+        }
     }
 }
