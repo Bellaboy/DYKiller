@@ -435,6 +435,90 @@ static void DKProbeAppendDouyinBar(NSMutableString *out, UITabBarController *con
     }
 }
 
+static void DKProbeAppendGlassLine(NSMutableString *out, NSString *label, UIView *host) {
+    UIView *glass = nil;
+    for (UIView *sub in host.subviews) {
+        if ([sub isKindOfClass:DKGlassFlexView.class]) {
+            glass = sub;
+            break;
+        }
+    }
+    UIVisualEffect *effect = [glass isKindOfClass:UIVisualEffectView.class]
+        ? ((UIVisualEffectView *)glass).effect : nil;
+    [out appendFormat:@"%@ = %@  glass=%@  effect=%@  tint=%@  跟随=%@\n",
+     label, DKProbeDesc(host),
+     glass ? NSStringFromCGRect(glass.frame) : @"(无)",
+     effect ? NSStringFromClass(effect.class) : @"(nil)",
+     DKProbeColorDesc(DKProbeValue(effect, @"tintColor")),
+     (glass && CGSizeEqualToSize(glass.bounds.size, host.bounds.size)) ? @"是" : @"否"];
+}
+
+static void DKProbeAppendShareInput(NSMutableString *out) {
+    Class overlayCls = NSClassFromString(@"AWEIMShareImpl.ShareAdditionTextView");
+    Class toolbarCls = NSClassFromString(@"AWEIMShareInputEmoticonToolBarView");
+    UIView *overlay = nil;
+    UIView *toolbar = nil;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:DKDebugTargetWindow()];
+    while (queue.count > 0) {
+        UIView *node = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if (overlayCls && !overlay && [node isKindOfClass:overlayCls]) overlay = node;
+        if (toolbarCls && !toolbar && [node isKindOfClass:toolbarCls]) toolbar = node;
+        if (overlay && toolbar) break;
+        [queue addObjectsFromArray:node.subviews];
+    }
+
+    [out appendFormat:@"覆盖层             = %@  hidden=%@  bg=%@\n",
+     DKProbeDesc(overlay), overlay.hidden ? @"YES" : @"NO",
+     DKProbeColorDesc(overlay.backgroundColor)];
+    if (overlay) {
+        UIView *host = [overlay isKindOfClass:UIVisualEffectView.class]
+            ? ((UIVisualEffectView *)overlay).contentView : overlay;
+        DKProbeAppendGlassLine(out, @"  覆盖层玻璃       ", host);
+        if ([overlay isKindOfClass:UIVisualEffectView.class]) {
+            [out appendFormat:@"  原生 effect      = %@\n",
+             ((UIVisualEffectView *)overlay).effect
+                 ? NSStringFromClass(((UIVisualEffectView *)overlay).effect.class) : @"(nil)"];
+        }
+        for (UIView *sub in host.subviews) {
+            CGFloat height = CGRectGetHeight(sub.bounds);
+            if (height > 0.1 && height < 1.5 && CGRectGetWidth(sub.bounds) >= 200.0) {
+                [out appendFormat:@"  顶部分割线       = hidden=%@ frame=%@\n",
+                 sub.hidden ? @"YES" : @"NO", NSStringFromCGRect(sub.frame)];
+                break;
+            }
+        }
+        NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:overlay];
+        while (stack.count > 0) {
+            UIView *node = stack.lastObject;
+            [stack removeLastObject];
+            if ([node isKindOfClass:UIButton.class]
+                && CGRectGetHeight(node.bounds) >= 36.0) {
+                NSString *title = DKProbeValue(node, @"currentTitle")
+                    ?: node.accessibilityLabel ?: @"";
+                if ([title containsString:@"发送"]) {
+                    DKProbeAppendGlassLine(out,
+                        [NSString stringWithFormat:@"  按钮「%@」     ", title], node);
+                }
+            }
+            [stack addObjectsFromArray:node.subviews];
+        }
+    }
+
+    [out appendFormat:@"表情栏             = %@  hidden=%@\n",
+     DKProbeDesc(toolbar), toolbar.hidden ? @"YES" : @"NO"];
+    if (toolbar) {
+        UIView *slot = DKProbeValue(toolbar, @"inputControlBar");
+        if (!slot) {
+            for (UIView *sub in toolbar.subviews) {
+                CGFloat height = CGRectGetHeight(sub.bounds);
+                if (height >= 32.0 && height <= 48.0) { slot = sub; break; }
+            }
+        }
+        if (slot) DKProbeAppendGlassLine(out, @"  控制条玻璃       ", slot);
+    }
+}
+
 // 进度条底边黑垫层的诊断：view tree 与 layers.json 都不采 backgroundColor，
 // 这里补齐，用于确认清除签名为何命中或不命中。
 static void DKProbeAppendProgressContainer(NSMutableString *out, UIView *root) {
@@ -701,6 +785,9 @@ NSString *DKTabBarProbeReport(void) {
 
     [out appendString:@"\n----- 进度条容器（黑垫层诊断）-----\n"];
     DKProbeAppendProgressContainer(out, DKDebugTargetWindow());
+
+    [out appendString:@"\n----- 分享面板输入 -----\n"];
+    DKProbeAppendShareInput(out);
 
     UITabBarController *controller = DKProbeTabBarController();
     if (!controller) {

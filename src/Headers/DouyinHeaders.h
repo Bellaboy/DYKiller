@@ -176,6 +176,14 @@
 - (void)updateImageViewWithViewModel:(id)viewModel;
 @end
 
+// 键盘拉起后挂在输入覆盖层下方；setTabBackgroundColor: 会重刷底色。
+@interface AWEIMShareInputEmoticonToolBarView : UIView
+@property (nonatomic, strong) UIView *inputControlBar;
+@property (nonatomic, strong) UIView *panelContainerView;
+@property (nonatomic, strong) UIView *lineSeparator;
+- (void)setTabBackgroundColor:(id)color;
+@end
+
 #pragma mark - 应用内通知功能组用到的类
 
 @interface AWEInnerNotificationContainerView : UIView

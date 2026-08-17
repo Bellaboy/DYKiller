@@ -1,6 +1,7 @@
 //
 //  DKSharePanelGlass.xm
-//  分享面板液态玻璃：卡片底色、关闭键与第三行圆钮。第二行通讯录与文字不接管。
+//  分享面板液态玻璃：卡片底色、关闭键、第三行圆钮，以及点头像后的输入覆盖层、
+//  发送按钮和表情栏。通讯录头像与输入文字本身不接管。
 //
 
 #import "DouyinHeaders.h"
@@ -15,7 +16,9 @@
 #import <objc/runtime.h>
 
 static NSString *const kDKShareEffectClass = @"DUXVisualEffectView";
+static NSString *const kDKShareOverlayClass = @"AWEIMShareImpl.ShareAdditionTextView";
 static const CGFloat kDKShareRadiusFloor = 20.0;
+static const CGFloat kDKShareSendRadiusFloor = 8.0;
 static const NSTimeInterval kDKShareGlassAnimation = 0.25;
 static const float kDKSharePlateLuma = 0.76f;
 static const float kDKSharePlateSat = 0.14f;
@@ -25,6 +28,7 @@ static char kSlotGlassKey;
 static char kGlassClearKey;
 static char kGlassStyleKey;
 static char kGlassMaterializingKey;
+static char kGlassFixedTintKey;
 static char kCloseOriginalConfigKey;
 static char kCloseOriginalImageKey;
 static char kCloseModeKey;
@@ -34,6 +38,19 @@ static char kCellOriginalColorKey;
 static char kCellGlassKey;
 static char kDestainedCacheKey;
 static char kDestainedFlagKey;
+static char kOverlayColorKey;
+static char kOverlayEffectKey;
+static char kOverlayTakenKey;
+static char kOverlayOpaqueKey;
+static char kOverlayGlassKey;
+static char kOverlayDividerKey;
+static char kDividerHiddenKey;
+static char kButtonColorKey;
+static char kButtonOpaqueKey;
+static char kButtonGlassKey;
+static char kToolbarColorKey;
+static char kToolbarOpaqueKey;
+static char kToolbarGlassKey;
 
 static NSHashTable *gGlassCarriers;
 static NSHashTable<AWESharePanelContainerViewController *> *gContainers;
@@ -77,11 +94,19 @@ static UIColor *DKShareTint(BOOL clear, UIUserInterfaceStyle style) {
     return clear ? DKGlassTintForStyle(style) : nil;
 }
 
-static UIGlassEffect *DKShareMakeEffect(BOOL clear, UIUserInterfaceStyle style)
+static UIColor *DKShareEffectTint(UIVisualEffectView *glass, BOOL clear, UIUserInterfaceStyle style)
+    API_AVAILABLE(ios(26.0)) {
+    UIColor *fixed = objc_getAssociatedObject(glass, &kGlassFixedTintKey);
+    if (fixed) return fixed;
+    return DKShareTint(clear, style);
+}
+
+static UIGlassEffect *DKShareMakeEffect(UIVisualEffectView *glass, BOOL clear,
+                                        UIUserInterfaceStyle style)
     API_AVAILABLE(ios(26.0)) {
     UIGlassEffect *effect = [UIGlassEffect effectWithStyle:
         clear ? UIGlassEffectStyleClear : UIGlassEffectStyleRegular];
-    effect.tintColor = DKShareTint(clear, style);
+    effect.tintColor = DKShareEffectTint(glass, clear, style);
     effect.interactive = YES;
     return effect;
 }
@@ -111,7 +136,7 @@ static void DKShareRunAnimation(UIViewController *controller, BOOL animated, voi
 
 static void DKShareInstallEffect(UIVisualEffectView *glass, BOOL clear, UIUserInterfaceStyle style)
     API_AVAILABLE(ios(26.0)) {
-    glass.effect = DKShareMakeEffect(clear, style);
+    glass.effect = DKShareMakeEffect(glass, clear, style);
     objc_setAssociatedObject(glass, &kGlassClearKey, @(clear), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(glass, &kGlassStyleKey, @(style), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
@@ -127,7 +152,7 @@ static BOOL DKShareGlassNeedsUpdate(UIVisualEffectView *glass, BOOL clear, UIUse
     if (!installedClear || installedClear.boolValue != clear) return YES;
     if (!installedStyle || installedStyle.integerValue != style) return YES;
     if (!current.interactive) return YES;
-    UIColor *want = DKShareTint(clear, style);
+    UIColor *want = DKShareEffectTint(glass, clear, style);
     return !((current.tintColor == want) || [current.tintColor isEqual:want]);
 }
 
@@ -584,11 +609,311 @@ static void DKShareApplyVisibleCells(AWESharePanelViewController *controller)
     for (AWESharePanelFunctionCell *cell in cells) DKShareApplyCell(cell, controller);
 }
 
+#pragma mark - 输入覆盖层 / 发送按钮 / 表情栏
+
+static Class DKShareOverlayClass(void) {
+    static Class cls;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cls = NSClassFromString(kDKShareOverlayClass); });
+    return cls;
+}
+
+static UIView *DKShareOverlayHost(UIView *overlay) {
+    return [overlay isKindOfClass:UIVisualEffectView.class]
+        ? ((UIVisualEffectView *)overlay).contentView : overlay;
+}
+
+static UIVisualEffectView *DKShareEnsureGlass(id owner, const void *key, UIView *flexSource)
+    API_AVAILABLE(ios(26.0)) {
+    UIVisualEffectView *glass = objc_getAssociatedObject(owner, key);
+    if (glass) return glass;
+    glass = DKShareMakeShell();
+    ((DKGlassFlexView *)glass).flexSourceView = flexSource;
+    objc_setAssociatedObject(owner, key, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [gGlassCarriers addObject:glass];
+    gEverAttached = YES;
+    return glass;
+}
+
+static void DKShareDiscardGlass(id owner, const void *key) {
+    UIView *glass = objc_getAssociatedObject(owner, key);
+    [glass removeFromSuperview];
+    [gGlassCarriers removeObject:glass];
+    objc_setAssociatedObject(owner, key, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void DKShareRememberColor(UIView *view, const void *colorKey, const void *opaqueKey) {
+    id existing = objc_getAssociatedObject(view, colorKey);
+    UIColor *color = view.backgroundColor;
+    if (existing && existing != [NSNull null]) return;
+    if (existing == [NSNull null] && (!color || CGColorGetAlpha(color.CGColor) <= 0.01)) return;
+    objc_setAssociatedObject(view, colorKey,
+                             color ?: (id)[NSNull null], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!objc_getAssociatedObject(view, opaqueKey)) {
+        objc_setAssociatedObject(view, opaqueKey, @(view.opaque), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static void DKShareRestoreColor(UIView *view, const void *colorKey, const void *opaqueKey) {
+    id color = objc_getAssociatedObject(view, colorKey);
+    if (!color) return;
+    NSNumber *opaque = objc_getAssociatedObject(view, opaqueKey);
+    objc_setAssociatedObject(view, colorKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(view, opaqueKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    view.backgroundColor = (color == [NSNull null]) ? nil : (UIColor *)color;
+    if (opaque) view.opaque = opaque.boolValue;
+}
+
+static UIView *DKShareFindDivider(UIView *host) {
+    for (UIView *sub in host.subviews) {
+        CGFloat height = CGRectGetHeight(sub.bounds);
+        if (height > 0.1 && height < 1.5
+            && CGRectGetWidth(sub.bounds) >= 200.0
+            && CGRectGetMinY(sub.frame) < 16.0) {
+            return sub;
+        }
+    }
+    return nil;
+}
+
+static void DKShareHideDivider(UIView *overlay) {
+    UIView *divider = objc_getAssociatedObject(overlay, &kOverlayDividerKey);
+    if (!divider) {
+        divider = DKShareFindDivider(DKShareOverlayHost(overlay));
+        if (!divider) return;
+        objc_setAssociatedObject(overlay, &kOverlayDividerKey, divider, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(divider, &kDividerHiddenKey, @(divider.hidden),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    divider.hidden = YES;
+}
+
+static void DKShareRestoreDivider(UIView *overlay) {
+    UIView *divider = objc_getAssociatedObject(overlay, &kOverlayDividerKey);
+    NSNumber *hidden = objc_getAssociatedObject(divider, &kDividerHiddenKey);
+    if (divider && hidden) divider.hidden = hidden.boolValue;
+    objc_setAssociatedObject(overlay, &kOverlayDividerKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(divider, &kDividerHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void DKShareRestoreOverlay(UIView *overlay) {
+    if (!overlay) return;
+    DKShareRestoreDivider(overlay);
+    DKShareDiscardGlass(overlay, &kOverlayGlassKey);
+    DKShareRestoreColor(overlay, &kOverlayColorKey, &kOverlayOpaqueKey);
+    objc_setAssociatedObject(overlay, &kOverlayTakenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIVisualEffect *effect = objc_getAssociatedObject(overlay, &kOverlayEffectKey);
+    objc_setAssociatedObject(overlay, &kOverlayEffectKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (effect && [overlay isKindOfClass:UIVisualEffectView.class]) {
+        ((UIVisualEffectView *)overlay).effect = effect;
+    }
+}
+
+// 覆盖层叠在第三行功能圆钮上，只能自己挂玻璃，不能只清底色。
+static void DKShareApplyOverlay(UIView *overlay, UIViewController *controller)
+    API_AVAILABLE(ios(26.0)) {
+    if (!overlay) return;
+    DKShareRememberColor(overlay, &kOverlayColorKey, &kOverlayOpaqueKey);
+    if (DKShareColorOpaque(overlay.backgroundColor)) overlay.backgroundColor = UIColor.clearColor;
+    overlay.opaque = NO;
+
+    if ([overlay isKindOfClass:UIVisualEffectView.class]) {
+        UIVisualEffectView *effectView = (UIVisualEffectView *)overlay;
+        if (effectView.effect && !objc_getAssociatedObject(overlay, &kOverlayEffectKey)) {
+            objc_setAssociatedObject(overlay, &kOverlayEffectKey,
+                                     effectView.effect, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        effectView.effect = nil;
+    }
+    objc_setAssociatedObject(overlay, &kOverlayTakenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    DKShareHideDivider(overlay);
+
+    UIView *host = DKShareOverlayHost(overlay);
+    if (!host) return;
+    host.opaque = NO;
+    UIVisualEffectView *glass = DKShareEnsureGlass(overlay, &kOverlayGlassKey, overlay);
+    if (!CGRectEqualToRect(glass.frame, host.bounds)) glass.frame = host.bounds;
+    DKShareEnsureBackmost(host, glass);
+    DKShareMaterialize(glass, controller);
+}
+
+static NSString *DKShareButtonTitle(UIButton *button) {
+    return button.currentTitle.length ? button.currentTitle
+        : (button.accessibilityLabel ?: @"");
+}
+
+static BOOL DKShareIsSendButton(UIView *view) {
+    if (![view isKindOfClass:UIButton.class]) return NO;
+    UIButton *button = (UIButton *)view;
+    if (CGRectGetHeight(button.bounds) < 36.0) return NO;
+    return [DKShareButtonTitle(button) containsString:@"发送"];
+}
+
+static void DKShareCollectSendButtons(UIView *view, NSMutableArray<UIButton *> *output,
+                                      NSUInteger depth) {
+    if (!view || depth > 8) return;
+    if (DKShareIsSendButton(view)) {
+        [output addObject:(UIButton *)view];
+        return;
+    }
+    for (UIView *subview in view.subviews) {
+        DKShareCollectSendButtons(subview, output, depth + 1);
+    }
+}
+
+static void DKShareRestoreSendButton(UIButton *button) {
+    if (!button) return;
+    DKShareDiscardGlass(button, &kButtonGlassKey);
+    DKShareRestoreColor(button, &kButtonColorKey, &kButtonOpaqueKey);
+}
+
+static void DKShareApplySendButton(UIButton *button, UIViewController *controller)
+    API_AVAILABLE(ios(26.0)) {
+    if (!button) return;
+    DKShareRememberColor(button, &kButtonColorKey, &kButtonOpaqueKey);
+    UIColor *current = button.backgroundColor;
+    if (current && CGColorGetAlpha(current.CGColor) > 0.01) {
+        button.backgroundColor = UIColor.clearColor;
+    }
+    button.opaque = NO;
+
+    // 玻璃挂在按钮内部：随按钮释放，并吃到原生 8pt 裁剪。
+    UIVisualEffectView *glass = DKShareEnsureGlass(button, &kButtonGlassKey, button);
+    CGFloat radius = button.layer.cornerRadius;
+    if (radius <= 0.0) radius = kDKShareSendRadiusFloor;
+    glass.cornerConfiguration =
+        [UICornerConfiguration configurationWithUniformRadius:[UICornerRadius fixedRadius:radius]];
+
+    id original = objc_getAssociatedObject(button, &kButtonColorKey);
+    NSString *title = DKShareButtonTitle(button);
+    BOOL primary = ([original isKindOfClass:UIColor.class] && DKShareColorOpaque((UIColor *)original))
+        || ([title containsString:@"发送"] && ![title containsString:@"建群"]);
+    if (primary) {
+        UIColor *tint = ([original isKindOfClass:UIColor.class] && DKShareColorOpaque((UIColor *)original))
+            ? (UIColor *)original
+            : [UIColor colorWithRed:0.9961 green:0.1725 blue:0.3333 alpha:1.0];
+        objc_setAssociatedObject(glass, &kGlassFixedTintKey, tint, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    if (!CGRectEqualToRect(glass.frame, button.bounds)) glass.frame = button.bounds;
+    DKShareEnsureBackmost(button, glass);
+    DKShareMaterialize(glass, controller);
+}
+
+static void DKShareApplySendButtons(UIView *overlay, UIViewController *controller)
+    API_AVAILABLE(ios(26.0)) {
+    NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+    DKShareCollectSendButtons(overlay, buttons, 0);
+    for (UIButton *button in buttons) DKShareApplySendButton(button, controller);
+}
+
+static void DKShareRestoreToolbarFill(UIView *view) {
+    DKShareRestoreColor(view, &kToolbarColorKey, &kToolbarOpaqueKey);
+}
+
+static void DKShareClearToolbarFills(UIView *view, NSUInteger depth) {
+    if (!view || depth > 4) return;
+    if ([view isKindOfClass:UIControl.class]
+        || [view isKindOfClass:UIImageView.class]
+        || [view isKindOfClass:UILabel.class]
+        || [view isKindOfClass:UIVisualEffectView.class]) {
+        return;
+    }
+    if (DKShareColorOpaque(view.backgroundColor)) {
+        DKShareRememberColor(view, &kToolbarColorKey, &kToolbarOpaqueKey);
+        view.backgroundColor = UIColor.clearColor;
+        view.opaque = NO;
+    }
+    for (UIView *subview in view.subviews) DKShareClearToolbarFills(subview, depth + 1);
+}
+
+static void DKShareRestoreToolbarFillsUnder(UIView *view, NSUInteger depth) {
+    if (!view || depth > 4) return;
+    if (objc_getAssociatedObject(view, &kToolbarColorKey)) DKShareRestoreToolbarFill(view);
+    for (UIView *subview in view.subviews) DKShareRestoreToolbarFillsUnder(subview, depth + 1);
+}
+
+static void DKShareRestoreToolbar(UIView *bar) {
+    if (!bar) return;
+    DKShareDiscardGlass(bar, &kToolbarGlassKey);
+    DKShareRestoreToolbarFillsUnder(bar, 0);
+}
+
+static UIView *DKShareToolbarSlot(UIView *bar) {
+    if ([bar respondsToSelector:@selector(inputControlBar)]) {
+        UIView *slot = ((AWEIMShareInputEmoticonToolBarView *)bar).inputControlBar;
+        if (slot) return slot;
+    }
+    for (UIView *subview in bar.subviews) {
+        CGFloat height = CGRectGetHeight(subview.bounds);
+        if (height >= 32.0 && height <= 48.0
+            && fabs(CGRectGetWidth(subview.bounds) - CGRectGetWidth(bar.bounds)) < 2.0) {
+            return subview;
+        }
+    }
+    return nil;
+}
+
+static void DKShareApplyToolbar(UIView *bar, UIViewController *controller)
+    API_AVAILABLE(ios(26.0)) {
+    if (!bar) return;
+    DKShareClearToolbarFills(bar, 0);
+    UIView *slot = DKShareToolbarSlot(bar);
+    if (!slot || !DKShareRectUsable(slot.bounds)) return;
+    slot.opaque = NO;
+    UIVisualEffectView *glass = DKShareEnsureGlass(bar, &kToolbarGlassKey, slot);
+    if (!CGRectEqualToRect(glass.frame, slot.bounds)) glass.frame = slot.bounds;
+    DKShareEnsureBackmost(slot, glass);
+    DKShareMaterialize(glass, controller);
+}
+
+static void DKShareWalkContent(AWESharePanelViewController *content, UIView **overlay, UIView **toolbar) {
+    if (overlay) *overlay = nil;
+    if (toolbar) *toolbar = nil;
+    if (!content.isViewLoaded) return;
+    Class overlayClass = DKShareOverlayClass();
+    Class toolbarClass = %c(AWEIMShareInputEmoticonToolBarView);
+    for (UIView *subview in content.view.subviews) {
+        if (overlay && overlayClass && !*overlay && [subview isKindOfClass:overlayClass]) {
+            *overlay = subview;
+        }
+        if (toolbar && toolbarClass && !*toolbar && [subview isKindOfClass:toolbarClass]) {
+            *toolbar = subview;
+        }
+    }
+}
+
+static void DKShareSyncInput(AWESharePanelViewController *content)
+    API_AVAILABLE(ios(26.0)) {
+    UIView *overlay = nil;
+    UIView *toolbar = nil;
+    DKShareWalkContent(content, &overlay, &toolbar);
+    if (overlay && !overlay.hidden) {
+        DKShareApplyOverlay(overlay, content);
+        DKShareApplySendButtons(overlay, content);
+    }
+    if (toolbar) DKShareApplyToolbar(toolbar, content);
+}
+
+static void DKShareRestoreInput(AWESharePanelViewController *content) {
+    UIView *overlay = nil;
+    UIView *toolbar = nil;
+    DKShareWalkContent(content, &overlay, &toolbar);
+    if (overlay) {
+        NSMutableArray<UIButton *> *buttons = [NSMutableArray array];
+        DKShareCollectSendButtons(overlay, buttons, 0);
+        for (UIButton *button in buttons) DKShareRestoreSendButton(button);
+        DKShareRestoreOverlay(overlay);
+    }
+    if (toolbar) DKShareRestoreToolbar(toolbar);
+}
+
 #pragma mark - 同步
 
 static void DKShareRestoreController(AWESharePanelContainerViewController *container) {
     AWESharePanelViewController *content = DKShareContentController(container);
     if (content.isViewLoaded) {
+        DKShareRestoreInput(content);
         DKShareRestoreClose(DKShareCloseButton(content));
         DKShareDetachPanel(content.view);
     }
@@ -603,6 +928,7 @@ static void DKShareRestoreAll(void) {
     for (AWESharePanelContainerViewController *container in gContainers.allObjects) {
         AWESharePanelViewController *content = DKShareContentController(container);
         if (content.isViewLoaded) {
+            DKShareRestoreInput(content);
             DKShareRestoreClose(DKShareCloseButton(content));
             DKShareDetachPanel(content.view);
         }
@@ -633,6 +959,7 @@ static void DKShareSync(AWESharePanelContainerViewController *container) API_AVA
     UIVisualEffectView *panel = DKShareAttachPanel(content.view, shell ?: content.view);
     DKShareApplyClose(DKShareCloseButton(content), content);
     DKShareApplyVisibleCells(content);
+    DKShareSyncInput(content);
     [CATransaction commit];
 
     if (panel) {
@@ -731,6 +1058,59 @@ static void DKShareRefreshVisible(void) {
 - (void)prepareForReuse {
     %orig;
     if (!DKShareEnabled()) DKShareRestoreCell(self);
+}
+
+%end
+
+%hook AWEIMShareInputEmoticonToolBarView
+
+- (void)layoutSubviews {
+    %orig;
+    if (!DKShareEnabled()) {
+        if (objc_getAssociatedObject(self, &kToolbarGlassKey)) DKShareRestoreToolbar(self);
+        return;
+    }
+    if (@available(iOS 26.0, *)) {
+        DKShareApplyToolbar(self, DKShareControllerForView(self));
+    }
+}
+
+- (void)setTabBackgroundColor:(id)color {
+    if (DKShareEnabled() && DKShareControllerForView(self)) {
+        if ([color isKindOfClass:UIColor.class] && DKShareColorOpaque(color)) {
+            DKShareRememberColor(self, &kToolbarColorKey, &kToolbarOpaqueKey);
+            %orig(UIColor.clearColor);
+            return;
+        }
+    }
+    %orig;
+}
+
+%end
+
+%hook UIVisualEffectView
+
+- (void)setEffect:(UIVisualEffect *)effect {
+    if (DKShareEnabled() && objc_getAssociatedObject(self, &kOverlayTakenKey) && effect) {
+        %orig(nil);
+        return;
+    }
+    %orig;
+}
+
+%end
+
+%hook UIView
+
+- (void)setBackgroundColor:(UIColor *)color {
+    if (DKShareEnabled() && DKShareColorOpaque(color)
+        && (objc_getAssociatedObject(self, &kOverlayColorKey)
+            || objc_getAssociatedObject(self, &kButtonColorKey)
+            || objc_getAssociatedObject(self, &kToolbarColorKey))) {
+        %orig(UIColor.clearColor);
+        return;
+    }
+    %orig;
 }
 
 %end
