@@ -165,6 +165,11 @@
 @interface AWEIMEmoticonPanelContainerView : UIView                 // 表情面板；评论区复用 IM 那一套，挂在输入容器里
 @end
 
+// 回复输入区上方那条小表情栏。它是键盘的输入附件，住在 UITextEffectsWindow 里，
+// 不在评论控制器的视图树内——只能按类名挂钩，遍历评论容器找不到它。
+@interface AWECommentMiniEmoticonPanelView : UIView
+@end
+
 #pragma mark - 分享面板功能组用到的类
 
 // DUX 底栏弹层外壳。contentView 是带 20pt 顶圆角的 DUXVisualEffectView，目前几乎不模糊。

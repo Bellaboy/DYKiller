@@ -308,6 +308,40 @@ static void DKProbeCollectCovers(UIView *view, UIColor *base, NSMutableArray<UIV
     }
 }
 
+// 视图连同每一级祖先都可见。「移除评论区底栏」把整个输入栏容器压成 alpha 0，玻璃跟着看不见；
+// 只看玻璃自己，会把「本来就不该让位」误报成「该让没让」。
+static BOOL DKProbeChainVisible(UIView *view) {
+    for (UIView *node = view; node; node = node.superview) {
+        if (!node || node.hidden || node.alpha < 0.01) return NO;
+    }
+    return view != nil;
+}
+
+// 小表情栏靠「透出输入栏那块玻璃」取得同档观感，自己不挂玻璃。两条读数各答一个问题：
+// 底色清了没有（清不掉就是一条黑杠），以及输入栏玻璃在不在它背后（不在就是一条原始视频）。
+// 它在另一个窗口里，两个窗口都是满屏同原点，各自的窗口坐标可以直接比。
+static void DKProbeAppendCommentEmoticonBar(NSMutableString *out, UIView *backdropGlass) {
+    UIView *panel = DKCommentGlassCurrentEmoticonPanel();
+    if (!panel || !panel.window) {
+        [out appendString:@"小表情栏             = (不在屏)\n"];
+        return;
+    }
+
+    CGRect panelRect = [panel convertRect:panel.bounds toView:nil];
+    [out appendFormat:@"小表情栏             = %@  窗口矩形=%@  窗口=%@\n",
+     DKProbeDesc(panel), NSStringFromCGRect(panelRect), NSStringFromClass(panel.window.class)];
+    [out appendFormat:@"  底色               = %@\n", DKProbeColorDesc(panel.backgroundColor)];
+
+    if (!backdropGlass.window || !DKProbeChainVisible(backdropGlass)) {
+        [out appendString:@"  背后是输入栏玻璃   = 否（输入栏没有可见玻璃）\n"];
+        return;
+    }
+    CGRect glassRect = [backdropGlass convertRect:backdropGlass.bounds toView:nil];
+    [out appendFormat:@"  背后是输入栏玻璃   = %@  玻璃窗口矩形=%@\n",
+     CGRectContainsRect(CGRectInset(glassRect, -0.5, -0.5), panelRect) ? @"是" : @"否",
+     NSStringFromCGRect(glassRect)];
+}
+
 // 评论面板玻璃：验收配置目标、公开属性、flex 交互、场景 trait 与有效圆角。
 // 只检查槽位现有子树，不访问 glass.contentView。
 static void DKProbeAppendCommentGlass(NSMutableString *out) {
@@ -385,6 +419,54 @@ static void DKProbeAppendCommentGlass(NSMutableString *out) {
          [glass effectiveRadiusForCorner:UIRectCornerBottomLeft],
          [glass effectiveRadiusForCorner:UIRectCornerBottomRight]];
     }
+
+    // 输入栏底色槽那一块玻璃与主面板玻璃上下拼接。这一行用「两块玻璃的边到底重不重合」量，
+    // 不复用实现里的判据：「工具栏透出评论行」和「面板中间一条没有玻璃」在观感上分不开，
+    // 但在这里一个是「叠了 N pt」、一个是「缺 N pt」。
+    UIView *backdrop = DKCommentGlassCurrentInputBackdrop();
+    UIView *backdropGlass = backdrop.subviews.firstObject;
+    if (![backdropGlass isKindOfClass:UIVisualEffectView.class]) backdropGlass = nil;
+    UIVisualEffect *backdropEffect = ((UIVisualEffectView *)backdropGlass).effect;
+
+    [out appendFormat:@"输入栏槽位           = %@  frame=%@  bg=%@\n",
+     DKProbeDesc(backdrop), NSStringFromCGRect(backdrop.frame),
+     DKProbeColorDesc(backdrop.backgroundColor)];
+    if (backdrop) {
+        [out appendFormat:@"  玻璃层             = %@  frame=%@\n",
+         DKProbeDesc(backdropGlass), NSStringFromCGRect(backdropGlass.frame)];
+        [out appendFormat:@"  effect             = %@  interactive=%@  tintColor=%@\n",
+         backdropEffect ? NSStringFromClass(backdropEffect.class) : @"(nil)",
+         [DKProbeValue(backdropEffect, @"interactive") boolValue] ? @"YES" : @"NO",
+         DKProbeColorDesc(DKProbeValue(backdropEffect, @"tintColor"))];
+        [out appendFormat:@"  flex 交互已挂      = %@  重定向目标=%@\n",
+         DKGlassFlexInstalled(backdropGlass) ? @"是" : @"否",
+         DKProbeDesc(DKGlassFlexResolvedSource(backdropGlass))];
+        [out appendFormat:@"  界面风格           = %@（override=%@）\n",
+         DKProbeStyleName(backdropGlass.traitCollection.userInterfaceStyle),
+         DKProbeStyleName(backdropGlass.overrideUserInterfaceStyle)];
+        [out appendFormat:@"  尺寸跟随           = %@\n",
+         backdropGlass && CGSizeEqualToSize(backdropGlass.bounds.size, backdrop.bounds.size)
+             ? @"是" : @"否"];
+    }
+
+    BOOL barCovers = backdropEffect && backdropGlass.window == slot.window
+        && DKProbeChainVisible(backdropGlass);
+    if (!barCovers) {
+        [out appendFormat:@"主面板让位           = 不该让（%@）  满幅？= %@\n",
+         backdropEffect ? @"输入栏不可见" : @"输入栏没有可用玻璃",
+         fabs(CGRectGetHeight(glass.frame) - CGRectGetHeight(slot.bounds)) <= 0.5 ? @"是" : @"否"];
+    } else {
+        CGRect cover = [backdropGlass convertRect:backdropGlass.bounds toView:slot];
+        CGFloat overlap = CGRectGetMaxY(glass.frame) - CGRectGetMinY(cover);
+        NSString *verdict = fabs(overlap) <= 0.5 ? @"是"
+            : (overlap > 0 ? [NSString stringWithFormat:@"否，叠了 %.1fpt（这一段两层玻璃，一块亮度台阶）", overlap]
+                           : [NSString stringWithFormat:@"否，缺 %.1fpt（这一段没有玻璃，露原始视频）", -overlap]);
+        [out appendFormat:@"主面板让位           = %@\n", verdict];
+        [out appendFormat:@"  面板玻璃底边       = %.1f  输入栏玻璃顶边 = %.1f  槽位高 = %.1f\n",
+         CGRectGetMaxY(glass.frame), CGRectGetMinY(cover), CGRectGetHeight(slot.bounds)];
+    }
+
+    DKProbeAppendCommentEmoticonBar(out, backdropGlass);
 
     // 输入框胶囊会在常驻态与回复态之间改变尺寸，探针直接核对玻璃是否仍与槽位等大。
     UIView *field = DKCommentGlassCurrentField();
