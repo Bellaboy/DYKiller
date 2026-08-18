@@ -308,6 +308,40 @@ static void DKProbeCollectCovers(UIView *view, UIColor *base, NSMutableArray<UIV
     }
 }
 
+// 输入区里还剩几块「满幅不透明底」。艾特面板、表情面板及其 tab 条的白底都该被实现层清掉，
+// 这里独立数一遍：>0 就是漏了哪一类，直接把类名和 frame 打出来。
+// 与实现层不同，这里**不跳过** UIControl / UILabel / UIImageView——满幅不透明的控件同样会
+// 在玻璃上糊出一块，漏进来要看得见。
+static void DKProbeCollectFullWidthCovers(UIView *view, UIView *root, NSUInteger depth,
+                                          NSMutableArray<UIView *> *out) {
+    if (depth > 8) return;
+    CGFloat width = CGRectGetWidth(root.bounds);
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:UIVisualEffectView.class]) continue;
+        if (sub.hidden || sub.alpha < 0.01) continue;
+        UIColor *color = sub.backgroundColor;
+        if (color && CGColorGetAlpha(color.CGColor) >= 0.99
+            && fabs(CGRectGetWidth(sub.bounds) - width) <= 1.0
+            && CGRectGetHeight(sub.bounds) >= 8.0) {
+            [out addObject:sub];
+        }
+        DKProbeCollectFullWidthCovers(sub, root, depth + 1, out);
+    }
+}
+
+// 折叠提示条：抖音拿它那块不透明底盖住旧的时间 / 回复 label。实现层清底色的同时要替抖音把被
+// 罩住的兄弟藏起来，两件事必须同进同出——这一行独立数三个量，任何一边落单都能立刻看出来：
+// 「亮着的折叠条」「其中底色还不透明的」「被我们藏起来的兄弟」。
+// 底色还不透明 > 0 → 玻璃上有白板；亮着的条数 > 0 而被藏兄弟 = 0 → 两层文字会叠在一起。
+static void DKProbeCollectFoldRows(UIView *view, Class foldClass, NSUInteger depth,
+                                   NSMutableArray<UIView *> *out) {
+    if (depth > 4 || !foldClass) return;
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:foldClass]) { [out addObject:sub]; continue; }
+        DKProbeCollectFoldRows(sub, foldClass, depth + 1, out);
+    }
+}
+
 // 视图连同每一级祖先都可见。「移除评论区底栏」把整个输入栏容器压成 alpha 0，玻璃跟着看不见；
 // 只看玻璃自己，会把「本来就不该让位」误报成「该让没让」。
 static BOOL DKProbeChainVisible(UIView *view) {
@@ -384,6 +418,31 @@ static void DKProbeAppendCommentGlass(NSMutableString *out) {
          DKProbeColorDesc(cover.backgroundColor)];
     }
 
+    Class foldClass = NSClassFromString(@"AWECommentPanelListSwiftImpl.CommentFoldDisplayView");
+    NSMutableArray<UIView *> *folds = [NSMutableArray array];
+    DKProbeCollectFoldRows(slot, foldClass, 0, folds);
+    if (!foldClass) {
+        [out appendString:@"  折叠提示条         = （类不在，抖音改名了）\n"];
+    } else if (folds.count > 0) {
+        NSUInteger active = 0, opaque = 0, masked = 0;
+        for (UIView *fold in folds) {
+            if (fold.hidden || fold.alpha < 0.01) continue;
+            active++;
+            if (fold.backgroundColor
+                && CGColorGetAlpha(fold.backgroundColor.CGColor) >= 0.99) opaque++;
+            for (UIView *sibling in fold.superview.subviews) {
+                if (sibling != fold && sibling.hidden
+                    && CGRectContainsRect(fold.frame, sibling.frame)) masked++;
+            }
+        }
+        [out appendFormat:@"  折叠提示条         = 在场 %lu 条  亮着 %lu 条  底色仍不透明 %lu 条"
+                          @"  被藏兄弟 %lu 个\n",
+         (unsigned long)folds.count, (unsigned long)active,
+         (unsigned long)opaque, (unsigned long)masked];
+    } else {
+        [out appendString:@"  折叠提示条         = 本页没有\n"];
+    }
+
     UIView *first = slot.subviews.firstObject;
     [out appendFormat:@"  最底层子视图       = %@（共 %lu 个）\n",
      first ? NSStringFromClass(first.class) : @"(无)", (unsigned long)slot.subviews.count];
@@ -420,15 +479,15 @@ static void DKProbeAppendCommentGlass(NSMutableString *out) {
          [glass effectiveRadiusForCorner:UIRectCornerBottomRight]];
     }
 
-    // 输入栏底色槽那一块玻璃与主面板玻璃上下拼接。这一行用「两块玻璃的边到底重不重合」量，
-    // 不复用实现里的判据：「工具栏透出评论行」和「面板中间一条没有玻璃」在观感上分不开，
-    // 但在这里一个是「叠了 N pt」、一个是「缺 N pt」。
-    UIView *backdrop = DKCommentGlassCurrentInputBackdrop();
+    // 整个输入区（底色槽、艾特面板、表情面板）共用挂在容器上的这一块玻璃，与主面板玻璃上下拼接。
+    // 「主面板让位」用「两块玻璃的边到底重不重合」量，不复用实现里的判据：「工具栏透出评论行」
+    // 和「面板中间一条没有玻璃」在观感上分不开，但在这里一个是「叠了 N pt」、一个是「缺 N pt」。
+    UIView *backdrop = DKCommentGlassCurrentInputContainer();
     UIView *backdropGlass = backdrop.subviews.firstObject;
     if (![backdropGlass isKindOfClass:UIVisualEffectView.class]) backdropGlass = nil;
     UIVisualEffect *backdropEffect = ((UIVisualEffectView *)backdropGlass).effect;
 
-    [out appendFormat:@"输入栏槽位           = %@  frame=%@  bg=%@\n",
+    [out appendFormat:@"输入栏容器           = %@  frame=%@  bg=%@\n",
      DKProbeDesc(backdrop), NSStringFromCGRect(backdrop.frame),
      DKProbeColorDesc(backdrop.backgroundColor)];
     if (backdrop) {
@@ -447,21 +506,46 @@ static void DKProbeAppendCommentGlass(NSMutableString *out) {
         [out appendFormat:@"  尺寸跟随           = %@\n",
          backdropGlass && CGSizeEqualToSize(backdropGlass.bounds.size, backdrop.bounds.size)
              ? @"是" : @"否"];
+        if (@available(iOS 26.0, *)) {
+            // 艾特 / 表情面板把输入区顶出主面板时顶边是压在视频上的自由边，该有 8pt 圆角；
+            // 贴着主面板玻璃时必须是 0，否则两角会露出原始视频。
+            UIVisualEffectView *bar = (UIVisualEffectView *)backdropGlass;
+            [out appendFormat:@"  顶部有效半径       = 左上 %.1f  右上 %.1f\n",
+             [bar effectiveRadiusForCorner:UIRectCornerTopLeft],
+             [bar effectiveRadiusForCorner:UIRectCornerTopRight]];
+        }
+        // 艾特面板、表情面板及其 tab 条的白底都要被满幅清扫清掉；>0 就是漏了。
+        NSMutableArray<UIView *> *inputCovers = [NSMutableArray array];
+        DKProbeCollectFullWidthCovers(backdrop, backdrop, 0, inputCovers);
+        [out appendFormat:@"  容器内残留不透明底 = %lu 处\n", (unsigned long)inputCovers.count];
+        for (NSUInteger i = 0; i < inputCovers.count && i < 5; i++) {
+            UIView *cover = inputCovers[i];
+            [out appendFormat:@"    %@ frame=%@ bg=%@\n",
+             DKProbeDesc(cover), NSStringFromCGRect(cover.frame),
+             DKProbeColorDesc(cover.backgroundColor)];
+        }
     }
 
     BOOL barCovers = backdropEffect && backdropGlass.window == slot.window
         && DKProbeChainVisible(backdropGlass);
-    if (!barCovers) {
+    CGRect barCover = barCovers ? [backdropGlass convertRect:backdropGlass.bounds toView:slot]
+                                : CGRectZero;
+    if (barCovers && CGRectGetMinY(barCover) <= 0.5) {
+        // 艾特 / 表情面板把输入区顶到了主面板槽位之上：整块槽位都被盖住，主面板玻璃应当整块收起。
+        [out appendFormat:@"主面板让位           = 整块被盖住（输入栏玻璃顶边 %.1f）  面板玻璃已隐藏？= %@\n",
+         CGRectGetMinY(barCover), glass.isHidden ? @"是" : @"否（这一段是两层玻璃）"];
+    } else if (!barCovers) {
         [out appendFormat:@"主面板让位           = 不该让（%@）  满幅？= %@\n",
          backdropEffect ? @"输入栏不可见" : @"输入栏没有可用玻璃",
          fabs(CGRectGetHeight(glass.frame) - CGRectGetHeight(slot.bounds)) <= 0.5 ? @"是" : @"否"];
     } else {
-        CGRect cover = [backdropGlass convertRect:backdropGlass.bounds toView:slot];
+        CGRect cover = barCover;
         CGFloat overlap = CGRectGetMaxY(glass.frame) - CGRectGetMinY(cover);
         NSString *verdict = fabs(overlap) <= 0.5 ? @"是"
             : (overlap > 0 ? [NSString stringWithFormat:@"否，叠了 %.1fpt（这一段两层玻璃，一块亮度台阶）", overlap]
                            : [NSString stringWithFormat:@"否，缺 %.1fpt（这一段没有玻璃，露原始视频）", -overlap]);
-        [out appendFormat:@"主面板让位           = %@\n", verdict];
+        [out appendFormat:@"主面板让位           = %@%@\n", verdict,
+         glass.isHidden ? @"（但面板玻璃是隐藏的，这一段没有玻璃）" : @""];
         [out appendFormat:@"  面板玻璃底边       = %.1f  输入栏玻璃顶边 = %.1f  槽位高 = %.1f\n",
          CGRectGetMaxY(glass.frame), CGRectGetMinY(cover), CGRectGetHeight(slot.bounds)];
     }

@@ -170,6 +170,13 @@
 @interface AWECommentMiniEmoticonPanelView : UIView
 @end
 
+// 点工具栏「@」拉起的艾特面板（横排头像 / 搜索结果表 / 加载与出错页）。
+// obtainPanelColor 是它唯一的取底色口：39.9.0 反汇编实测本类内 5 处引用，
+// 5 处的返回值都直接进 setBackgroundColor:，没有一处当文字色或描边色用。
+@interface AWECommentSearchViewController : UIViewController
+- (id)obtainPanelColor;
+@end
+
 #pragma mark - 分享面板功能组用到的类
 
 // DUX 底栏弹层外壳。contentView 是带 20pt 顶圆角的 DUXVisualEffectView，目前几乎不模糊。

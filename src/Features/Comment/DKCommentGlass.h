@@ -22,9 +22,10 @@ UIView *DKCommentGlassCurrentSlot(void);
 /// 它的尺寸由抖音在常驻态与回复态之间来回改，探针据此核对玻璃有没有跟上。
 UIView *DKCommentGlassCurrentField(void);
 
-/// 最近接管的输入栏底色槽；从未接管过时为 nil。
-/// 它那块玻璃与主面板玻璃上下拼接，探针据此核对主面板有没有正确让位。
-UIView *DKCommentGlassCurrentInputBackdrop(void);
+/// 最近接管的输入栏容器；从未接管过时为 nil。
+/// 整个输入区（底色槽、艾特面板、表情面板）共用挂在它身上的那一块玻璃，与主面板玻璃上下拼接。
+/// 探针据此核对主面板有没有正确让位、容器里的不透明底清干净没有。
+UIView *DKCommentGlassCurrentInputContainer(void);
 
 /// 在场的小表情栏（键盘输入附件，住在 UITextEffectsWindow 里）；不在屏时为 nil。
 /// 它靠透出输入栏那块玻璃取得同档观感，探针据此核对底色清了没有、玻璃在不在它背后。

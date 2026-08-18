@@ -17,13 +17,17 @@
 //  · 新建时 effect=nil 挂载，再在转场协调器或短动画中写入 effect，走系统 materialize；
 //    禁止用 alpha 淡入（UIVisualEffectView 文档：alpha < 1 会失真甚至不显示）。
 //
-//  · 输入栏底色槽有自己的一块平角玻璃，主面板玻璃让位到输入栏容器顶边——两块上下拼接、
-//    互不重叠。回复态输入栏跳到面板中段、与评论列表整段重叠，只清成透明会直接看见评论行；
-//    而玻璃叠玻璃是一整块肉眼可见的亮度台阶（实测见 docs/comment-panel-liquid-glass.md）。
-//    让位只让「能证明被盖住」的那一段，判据不成立一律回满幅，不会留洞。
+//  · 整个输入区共用一块玻璃，挂在 CommentInputContainerView 自己身上——容器才是「输入区」这个
+//    语义单位，抖音在里面怎么挪槽位（拉起艾特面板时底色槽整体下移、腾出顶上 120pt）都不影响
+//    覆盖范围。容器内的不透明底（底色槽、艾特面板、表情面板及其 tab 条）统一按满幅清扫清掉。
+//
+//  · 主面板玻璃让位到输入区顶边——两块上下拼接、互不重叠。回复态输入栏跳到面板中段、与评论
+//    列表整段重叠，只清成透明会直接看见评论行；而玻璃叠玻璃是一整块肉眼可见的亮度台阶
+//    （实测见 docs/comment-panel-liquid-glass.md）。让位只让「能证明被盖住」的那一段，
+//    判据不成立一律回满幅，不会留洞；输入区盖到槽位顶边之上时主面板玻璃整块隐藏。
 //    输入框保持独立胶囊，不使用 UIGlassContainerEffect（嵌套会被合并成同一形状）。
 //
-//  · 小表情栏住在 UITextEffectsWindow 里，够不着也不必够——它的矩形正好落在输入栏玻璃之内，
+//  · 小表情栏住在 UITextEffectsWindow 里，够不着也不必够——它的矩形正好落在输入区玻璃之内，
 //    只清掉自己的不透明底色，透出来的就是同一块玻璃。
 //
 //  · 热更新的「不透明绘制优化」从抖音自己的 AB 网关关掉，等于把收到热更新的设备退回没收到的
@@ -51,6 +55,8 @@ static NSString *const kDKInnerControllerClass =
     @"AWECommentPanelContainerSwiftImpl.CommentContainerInnerViewController";
 static NSString *const kDKInputContainerClass =
     @"AWECommentInputViewSwiftImpl.CommentInputContainerView";
+static NSString *const kDKFoldDisplayClass =
+    @"AWECommentPanelListSwiftImpl.CommentFoldDisplayView";
 
 // 输入栏底色槽的尺寸比对容差。
 static const CGFloat kDKSlotSizeTolerance = 0.5;
@@ -58,6 +64,11 @@ static const CGFloat kDKSlotSizeTolerance = 0.5;
 static const CGFloat kDKTopRadiusFloor = 8.0;
 // 没有可复用的页面转场时，材质更换使用这个短动画。
 static const NSTimeInterval kDKGlassAnimationDuration = 0.25;
+// 满幅底色清扫的深度上限：主面板要一路走到 Cell 里（第 12 层左右）；输入栏容器最深只到表情
+// 面板的 tab 条（第 6 层），收窄一点也把表情面板展开时的遍历成本关住。判据见 DKIsCoverCandidate。
+static const NSUInteger kDKPanelCoverWalkDepth = 14;
+static const NSUInteger kDKInputCoverWalkDepth = 8;
+static const CGFloat kDKCoverMinHeight = 8.0;
 
 #pragma mark - 状态（全部挂在被改动的视图上，多个评论面板并存也互不干扰）
 
@@ -66,6 +77,7 @@ static char kSlotGlassKey;             // 槽位：我们插的玻璃层
 static char kCoverOriginalColorKey;    // 遮盖层：抖音写的底色
 static char kGlassClearModeKey;         // 玻璃：当前 effect 是否按 Clear 构造
 static char kGlassMaterializingKey;     // 玻璃：已排入 materialize，防止重复排队
+static char kFoldMaskedHiddenKey;       // 被折叠条盖住的兄弟：抖音原本的 hidden
 
 // 本次会话是否接管过槽位。开关一直关着的用户不必为每帧的查找与还原付出代价。
 static BOOL gEverAttached = NO;
@@ -73,6 +85,8 @@ static BOOL gEverAttached = NO;
 static NSHashTable *gGlassCarriers = nil;
 // 已清过底色的满幅遮盖层，关开关时还原。
 static NSHashTable *gClearedCovers = nil;
+// 被折叠提示条盖住、由我们代抖音藏起来的兄弟视图，关开关时还原。
+static NSHashTable *gFoldMaskedViews = nil;
 // 已挂上深浅色监听的场景，避免重复注册。
 static __weak UIWindowScene *gObservedScene = nil;
 // 拦下「不透明绘制优化」网关的次数，只给调试探针读。
@@ -80,8 +94,8 @@ static NSUInteger gRenderOptimizeBlocks = 0;
 // 最近接管的面板槽位与输入框槽位，只给调试探针读。
 static __weak UIView *gLastPanelSlot = nil;
 static __weak UIView *gLastFieldSlot = nil;
-// 最近接管的输入栏底色槽。主面板玻璃的让位判据、小表情栏的清色判据都以它那块玻璃为准。
-static __weak UIView *gLastInputBackdrop = nil;
+// 最近接管的输入栏容器。主面板玻璃的让位判据、小表情栏的清色判据都以它那块玻璃为准。
+static __weak UIView *gLastInputContainer = nil;
 // 在场的小表情栏。它随键盘来去，玻璃可能比它后到，同步时补清一次。
 static __weak UIView *gEmoticonPanel = nil;
 // 最近同步过的评论控制器，供小表情栏那条补救路径回调同步（见 DKCommentEmoticonHook）。
@@ -95,8 +109,8 @@ UIView *DKCommentGlassCurrentField(void) {
     return gLastFieldSlot;
 }
 
-UIView *DKCommentGlassCurrentInputBackdrop(void) {
-    return gLastInputBackdrop;
+UIView *DKCommentGlassCurrentInputContainer(void) {
+    return gLastInputContainer;
 }
 
 UIView *DKCommentGlassCurrentEmoticonPanel(void) {
@@ -288,26 +302,24 @@ static UIView *DKInputContainer(UIViewController *controller) {
     return nil;
 }
 
-// 输入栏有两个槽位：铺满容器的底色槽，以及输入框那枚圆角胶囊。
-static void DKResolveInputSlots(UIView *container, UIView **backdrop, UIView **field) {
-    *backdrop = nil;
-    *field = nil;
-    if (!container) return;
+// 输入栏里只剩一个要单独接管的槽位：输入框那枚圆角胶囊。
+// 整个输入区的底（底色槽、艾特面板、表情面板）由容器那一块玻璃统一垫，见 DKSyncInputGlass。
+static UIView *DKInputFieldSlot(UIView *container) {
+    if (!container) return nil;
 
     NSMutableArray<UIView *> *candidates = [NSMutableArray array];
     DKCollectSlotCandidates(container, 0, candidates);
 
     CGSize size = container.bounds.size;
     for (UIView *candidate in candidates) {
+        // 铺满容器的是底色槽、艾特面板或表情面板，都不是胶囊——它们由容器那块玻璃统一垫。
         CGSize candidateSize = candidate.bounds.size;
-        BOOL fillsContainer = fabs(candidateSize.width - size.width) <= kDKSlotSizeTolerance
-            && fabs(candidateSize.height - size.height) <= kDKSlotSizeTolerance;
-        if (!*backdrop && fillsContainer) {
-            *backdrop = candidate;
-        } else if (!*field && candidate.layer.cornerRadius > 0.0) {
-            *field = candidate;
-        }
+        if (fabs(candidateSize.width - size.width) <= kDKSlotSizeTolerance) continue;
+        // 发送键之类的圆角控件也有底色，胶囊本身从来不是控件。
+        if ([candidate isKindOfClass:UIControl.class]) continue;
+        if (candidate.layer.cornerRadius > 0.0) return candidate;
     }
+    return nil;
 }
 
 #pragma mark - 玻璃层
@@ -323,18 +335,28 @@ typedef NS_ENUM(NSUInteger, DKGlassShape) {
     DKGlassShapeTopRounded = 0,
     // 正圆胶囊：输入框那枚控件。
     DKGlassShapeCapsule,
-    // 平角：输入栏底色槽。它与主面板玻璃是上下拼接，顶边给圆角会在两角露出原始视频。
-    DKGlassShapeFlat,
+    // 输入栏容器，平角：它与主面板玻璃上下拼接，顶边给圆角会在两角露出原始视频。
+    DKGlassShapeBarFlat,
+    // 输入栏容器，上圆下方：艾特 / 表情面板把输入区顶出主面板之后，顶边成了露在视频上的自由边，
+    // 原生那条盖条就是 8pt 圆角。
+    DKGlassShapeBarRounded,
 };
 
+static BOOL DKGlassShapeIsBar(DKGlassShape shape) {
+    return shape == DKGlassShapeBarFlat || shape == DKGlassShapeBarRounded;
+}
+
 static void DKSyncPanelGlassHeight(void);
+static void DKClearCoverLayers(UIView *slot, NSUInteger maxDepth);
 
 // 输入栏那块玻璃。它带 FlexibleWidth|FlexibleHeight，输入栏容器在常驻态与回复态之间
 // 改尺寸（82 ↔ 545）时 UIKit 会跟着改它的 bounds，于是本回调必然被调用一次。
 // 主面板玻璃的让位高度就在这里重算：改输入栏几何的那次布局与重算主面板的那次是同一次，
 // 结构上无法失步——这正是「主面板截到输入栏顶边」这条路以前会留洞的原因。
 // 这里改的是另一棵子树里的视图（主面板玻璃），不改自身 frame，不会形成布局环。
-@interface DKCommentBarGlassView : DKGlassFlexView
+@interface DKCommentBarGlassView : DKGlassFlexView {
+    CGSize _dkSweptSize;   // 上次补扫时的容器尺寸，只在形态真的变了时再扫
+}
 @end
 
 @implementation DKCommentBarGlassView
@@ -342,6 +364,14 @@ static void DKSyncPanelGlassHeight(void);
 - (void)layoutSubviews {
     [super layoutSubviews];
     DKSyncPanelGlassHeight();
+
+    // 尺寸变了 = 输入区换了形态（艾特面板 / 表情面板出现或收起）。新露出来的那一块若在玻璃
+    // 出现**之前**就被抖音画过底色，取色口那道拦截赶不上，按形态变化补扫一次。
+    // 只认尺寸变化：layoutSubviews 本身可能被调很多次，而形态切换一共就那么几次。
+    CGSize size = self.bounds.size;
+    if (CGSizeEqualToSize(size, _dkSweptSize)) return;
+    _dkSweptSize = size;
+    DKClearCoverLayers(self.superview, kDKInputCoverWalkDepth);
 }
 
 @end
@@ -349,7 +379,7 @@ static void DKSyncPanelGlassHeight(void);
 // 先以 nil effect 建好视图；挂上视图树并完成几何后再走系统 materialize。
 // 用 DKGlassFlexView 而不是裸 UIVisualEffectView：它多一条触摸源重定向，除此之外行为一致。
 static UIVisualEffectView *DKMakeGlassShell(DKGlassShape shape) API_AVAILABLE(ios(26.0)) {
-    Class shellClass = shape == DKGlassShapeFlat ? DKCommentBarGlassView.class : DKGlassFlexView.class;
+    Class shellClass = DKGlassShapeIsBar(shape) ? DKCommentBarGlassView.class : DKGlassFlexView.class;
     DKGlassFlexView *glass = [[shellClass alloc] initWithEffect:nil];
     glass.userInteractionEnabled = NO;
     glass.alpha = 1.0;
@@ -362,7 +392,13 @@ static UIVisualEffectView *DKMakeGlassShell(DKGlassShape shape) API_AVAILABLE(io
 // 胶囊：系统 capsuleConfiguration，正方形/扁矩形上都保证有效圆角 > 0。
 static void DKApplyGlassShape(UIVisualEffectView *glass, UIView *slot, DKGlassShape shape)
     API_AVAILABLE(ios(26.0)) {
-    if (shape == DKGlassShapeFlat) return;
+    // cornerConfiguration 是 nonnull，且形状会在 BarFlat / BarRounded 之间来回切，
+    // 必须显式写回 0 半径，不能留着上一次的圆角。
+    if (shape == DKGlassShapeBarFlat) {
+        glass.cornerConfiguration =
+            [UICornerConfiguration configurationWithUniformRadius:[UICornerRadius fixedRadius:0.0]];
+        return;
+    }
     if (shape == DKGlassShapeCapsule) {
         glass.cornerConfiguration = [UICornerConfiguration capsuleConfiguration];
         return;
@@ -425,8 +461,12 @@ static BOOL DKClearSlotColor(UIView *slot) {
 // 这条结构判据仍然要留：未热更设备上抖音会在列表内容底边放一块满幅不透明垫底块
 // （实测 428×200 纯黑、无子视图，挂在 clipsToBounds 的 tab 内容列表里），
 // 不清的话往下拉过头会露出一条黑带，与热更新无关，网关管不到。
-static const NSUInteger kDKCoverWalkDepth = 14;
-static const CGFloat kDKCoverMinHeight = 8.0;
+static Class DKFoldDisplayClass(void) {
+    static Class cls = Nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cls = NSClassFromString(kDKFoldDisplayClass); });
+    return cls;
+}
 
 static BOOL DKIsCoverCandidate(UIView *view, UIView *slot) {
     if (!view || view == slot) return NO;
@@ -453,19 +493,19 @@ static void DKClearCoverColor(UIView *view) {
     view.backgroundColor = UIColor.clearColor;
 }
 
-static void DKWalkClearCovers(UIView *view, UIView *slot, NSUInteger depth) {
-    if (depth > kDKCoverWalkDepth) return;
+static void DKWalkClearCovers(UIView *view, UIView *slot, NSUInteger depth, NSUInteger maxDepth) {
+    if (depth > maxDepth) return;
     for (UIView *sub in view.subviews) {
         if ([sub isKindOfClass:UIVisualEffectView.class]) continue;
         if (DKIsCoverCandidate(sub, slot)) DKClearCoverColor(sub);
         if ([sub isKindOfClass:UILabel.class] || [sub isKindOfClass:UIImageView.class]) continue;
-        DKWalkClearCovers(sub, slot, depth + 1);
+        DKWalkClearCovers(sub, slot, depth + 1, maxDepth);
     }
 }
 
-static void DKClearCoverLayers(UIView *slot) {
+static void DKClearCoverLayers(UIView *slot, NSUInteger maxDepth) {
     if (!slot) return;
-    DKWalkClearCovers(slot, slot, 0);
+    DKWalkClearCovers(slot, slot, 0, maxDepth);
 }
 
 static void DKRestoreCoverColor(UIView *view) {
@@ -522,26 +562,26 @@ static void DKDetachGlass(UIView *slot) {
 
 // 输入栏那块玻璃在不在场、是不是真的在渲染。effect 是几何之后才写的，所以没写入就还不算数。
 static UIVisualEffectView *DKUsableInputGlass(void) {
-    UIVisualEffectView *glass = objc_getAssociatedObject(gLastInputBackdrop, &kSlotGlassKey);
+    UIVisualEffectView *glass = objc_getAssociatedObject(gLastInputContainer, &kSlotGlassKey);
     if (!glass || !glass.effect || !glass.window || !DKViewChainVisible(glass)) return nil;
     return glass;
 }
 
 // 输入栏那块玻璃是否**确实**盖住了槽位某条横线以下的整段。除了「在渲染」，还要与槽位同属一个
 // 评论控制器、同窗口、满宽、底边到槽位底边。任一条不成立就当没盖住。
-// gLastInputBackdrop 是「最近一个」，同源判定挡住另一个面板的残留。
+// gLastInputContainer 是「最近一个」，同源判定挡住另一个面板的残留。
 static BOOL DKInputGlassCoverage(UIView *slot, CGFloat *coverTop) {
     UIVisualEffectView *glass = DKUsableInputGlass();
     if (!glass || !slot.window || glass.window != slot.window) return NO;
-    if (!slot.superview || ![gLastInputBackdrop isDescendantOfView:slot.superview]) return NO;
+    if (!slot.superview || ![gLastInputContainer isDescendantOfView:slot.superview]) return NO;
 
     CGRect cover = [glass convertRect:glass.bounds toView:slot];
     CGSize size = slot.bounds.size;
     if (CGRectGetMinX(cover) > 0.5 || CGRectGetMaxX(cover) < size.width - 0.5) return NO;
     if (CGRectGetMaxY(cover) < size.height - 0.5) return NO;
-    // 连槽位顶边都盖住时没有可让的余地，按没盖住处理——多一块重叠也好过整块面板没有玻璃。
-    if (CGRectGetMinY(cover) <= 0.0) return NO;
 
+    // 可以是负的：艾特 / 表情面板把输入区顶出主面板之后，容器顶边高过槽位顶边，
+    // 等于整个槽位都被盖住。调用方据此把主面板玻璃整块收起来。
     *coverTop = CGRectGetMinY(cover);
     return YES;
 }
@@ -556,10 +596,95 @@ static void DKSyncPanelGlassHeight(void) {
     UIVisualEffectView *glass = objc_getAssociatedObject(slot, &kSlotGlassKey);
     if (!glass || !DKCommentGlassEnabled()) return;
 
-    CGRect target = slot.bounds;
     CGFloat coverTop = 0.0;
-    if (DKInputGlassCoverage(slot, &coverTop)) target.size.height = coverTop;
+    BOOL covered = DKInputGlassCoverage(slot, &coverTop);
+    // 输入区盖到了槽位顶边之上（艾特 / 表情面板那种形态）：整块收起来。用 hidden 而不是把高度
+    // 压成 0——零尺寸的 UIGlassEffect 建不出材质层，之后再撑大也补不回来
+    // （见 docs/share-panel-liquid-glass.md 的 beta4 一节）。
+    BOOL entirelyCovered = covered && coverTop <= 0.5;
+    if (glass.hidden != entirelyCovered) glass.hidden = entirelyCovered;
+    if (entirelyCovered) return;
+
+    CGRect target = slot.bounds;
+    if (covered) target.size.height = coverTop;
     if (!CGRectEqualToRect(glass.frame, target)) glass.frame = target;
+}
+
+#pragma mark - 折叠提示条
+
+// 对某条评论点「不喜欢」后，抖音把这条 Cell 压矮并亮出「① 该评论被折叠」提示条。
+//
+// **那块不透明底不是同色隐形块，是抖音的功能性遮罩**：折叠时它并不隐藏旧的时间 / 回复 label，
+// 而是拿提示条这块不透明色盖住它们（实测提示条 {60,30,276.05,18} 正好罩住时间 {60,31,93,16}
+// 与回复 {169,31,26,16}）。所以只清底色会让两层文字叠在一起，必须同时替抖音把被罩住的那几个
+// 兄弟藏起来——0.5.6-beta4 只清不藏，就是「缩放后折叠评论很错乱」。
+//
+// 提示条在每个 Cell 里都预先存在（alpha=0、底色 clear），折叠时抖音只改 alpha 与底色，
+// **没有任何视图新增**，所以挂在「Cell 上屏」上的钩子对原地折叠永远不响。
+// 判据全部现取现算、不存状态机：每次收敛都按提示条此刻的状态决定藏还是放。
+static const NSUInteger kDKFoldWalkDepth = 3;
+
+static BOOL DKFoldRowActive(UIView *fold) {
+    if (!DKViewIsVisible(fold)) return NO;
+    // 底色被我们清过之后就只剩记忆可认，两者取其一。
+    return DKColorIsOpaque(fold.backgroundColor)
+        || objc_getAssociatedObject(fold, &kCoverOriginalColorKey) != nil;
+}
+
+static void DKUnmaskFoldSibling(UIView *view) {
+    NSNumber *original = objc_getAssociatedObject(view, &kFoldMaskedHiddenKey);
+    if (!original) return;
+    objc_setAssociatedObject(view, &kFoldMaskedHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [gFoldMaskedViews removeObject:view];
+    view.hidden = original.boolValue;
+}
+
+static void DKRestoreAllFoldMasks(void) {
+    NSArray<UIView *> *views = gFoldMaskedViews.allObjects;
+    for (UIView *view in views) DKUnmaskFoldSibling(view);
+    [gFoldMaskedViews removeAllObjects];
+}
+
+// 收敛一条折叠提示条：亮着就清底色 + 藏被它完整罩住的可见兄弟，灭了就原样放回去。
+// 「完整罩住」而不是「相交」——头像在左、点赞与不喜欢在右、昵称在上、正文比它宽，都不会命中。
+static void DKSyncFoldRow(UIView *fold) {
+    UIView *parent = fold.superview;
+    if (!parent) return;
+
+    if (!DKFoldRowActive(fold)) {
+        // 只放兄弟，**不把底色还回去**。取消不喜欢时抖音是用动画把提示条 alpha 收到 0 的，
+        // 而 view.alpha 读的是 model 值——动画一开始它就是 0 了，presentation 还整整齐齐在屏上。
+        // 这时候写回不透明白色，就是那一下「展开前闪一块折叠底色」。
+        // 也不存在「没还原」的问题：抖音自己的未折叠态本来就是 alpha 0 + 底色 clear
+        // （原始评论导出实测），留着 clear 正是它该有的样子；记忆留着还能顺带挡住抖音在
+        // 这段动画里的回写，下次再折叠时也不会先闪一下白。关开关走 DKRestoreAllCovers() 还原。
+        for (UIView *sibling in parent.subviews) DKUnmaskFoldSibling(sibling);
+        return;
+    }
+
+    DKClearCoverColor(fold);
+    CGRect covered = fold.frame;
+    for (UIView *sibling in parent.subviews) {
+        if (sibling == fold) continue;
+        if (objc_getAssociatedObject(sibling, &kFoldMaskedHiddenKey)) continue;
+        if (sibling.hidden || !CGRectContainsRect(covered, sibling.frame)) continue;
+        objc_setAssociatedObject(sibling, &kFoldMaskedHiddenKey, @(sibling.hidden),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [gFoldMaskedViews addObject:sibling];
+        sibling.hidden = YES;
+    }
+}
+
+static void DKSyncFoldRowsIn(UIView *view, Class foldClass, NSUInteger depth) {
+    if (depth > kDKFoldWalkDepth) return;
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:foldClass]) {
+            DKSyncFoldRow(sub);
+            continue;
+        }
+        if ([sub isKindOfClass:UILabel.class] || [sub isKindOfClass:UIImageView.class]) continue;
+        DKSyncFoldRowsIn(sub, foldClass, depth + 1);
+    }
 }
 
 #pragma mark - 小表情栏
@@ -590,26 +715,33 @@ static void DKApplyEmoticonPanel(void) {
 // 输入栏在「移除评论区底栏」开启时被压成 alpha 0，此时整段不做；它的显隐 owner 是
 // DKCommentBottomBar，这里只读不写。只挂壳与几何，effect 由调用方在 CATransaction 外 materialize。
 //
-// 底色槽自己一块平角玻璃：回复态输入栏跳到面板中段、与评论列表整段重叠，只清成透明会直接
-// 看见评论行。工具栏与发送键是底色槽的兄弟，这块玻璃就在它们背后，不必单独接管。
+// 玻璃挂在**容器**上而不是里面的底色槽上：容器才是「整个输入区」这个语义单位。拉起艾特面板时
+// 抖音把底色槽整体下移、腾出顶上 120pt 给艾特面板，玻璃跟着底色槽走就够不到那一块；
+// 挂在容器上则不管抖音在里面怎么挪槽位，覆盖范围都等于输入区本身。
+// 容器里各种不透明底（底色槽、艾特面板、表情面板及其 tab 条）统一交给满幅清扫。
 static void DKSyncInputGlass(UIView *container) API_AVAILABLE(ios(26.0)) {
     if (!DKViewIsVisible(container)) return;
 
-    UIView *backdrop = nil;
-    UIView *field = nil;
-    DKResolveInputSlots(container, &backdrop, &field);
+    // 顶边露在主面板槽位之上时它是压在视频上的自由边，按原生那条盖条给 8pt 圆角；
+    // 贴着主面板玻璃时必须平角——给了圆角会在两角露出原始视频。
+    UIView *panel = gLastPanelSlot;
+    BOOL freeTopEdge = panel.window == container.window
+        && [container convertPoint:CGPointZero toView:panel].y < -0.5;
+    DKGlassShape shape = freeTopEdge ? DKGlassShapeBarRounded : DKGlassShapeBarFlat;
 
-    UIVisualEffectView *backdropGlass = backdrop
-        ? (UIVisualEffectView *)DKAttachGlass(backdrop, DKGlassShapeFlat, YES) : nil;
-    if (backdropGlass) {
-        gLastInputBackdrop = backdrop;
-        // 触摸源取整个输入栏容器：工具栏按钮与发送键都在底色槽之外，不在它的子树里。
-        ((DKGlassFlexView *)backdropGlass).flexSourceView = container;
-        if (!CGRectEqualToRect(backdropGlass.frame, backdrop.bounds)) {
-            backdropGlass.frame = backdrop.bounds;
+    UIVisualEffectView *barGlass = (UIVisualEffectView *)DKAttachGlass(container, shape, NO);
+    if (barGlass) {
+        gLastInputContainer = container;
+        // 触摸源取容器自己：工具栏按钮、发送键、艾特头像都在它的子树里。
+        ((DKGlassFlexView *)barGlass).flexSourceView = container;
+        if (!CGRectEqualToRect(barGlass.frame, container.bounds)) {
+            barGlass.frame = container.bounds;
         }
-        DKEnsureBackmost(backdrop, backdropGlass);
+        DKEnsureBackmost(container, barGlass);
+        DKClearCoverLayers(container, kDKInputCoverWalkDepth);
     }
+
+    UIView *field = DKInputFieldSlot(container);
     if (!field) return;
 
     // 胶囊不用 UIGlassContainerEffect：嵌套会被合并成同一形状。
@@ -637,13 +769,12 @@ static void DKCommentGlassSync(UIViewController *controller) API_AVAILABLE(ios(2
 
     if (!enabled) {
         // 还原一次即收敛：槽位记忆清空后，后续布局只剩几次空查找。
+        // 玻璃可能正处在「整块被盖住」的隐藏态，DKDetachGlass 直接把它摘掉，不必先复位。
         DKDetachGlass(panel);
-        UIView *backdrop = nil;
-        UIView *field = nil;
-        DKResolveInputSlots(inputContainer, &backdrop, &field);
-        DKDetachGlass(backdrop);
-        DKDetachGlass(field);
+        DKDetachGlass(inputContainer);
+        DKDetachGlass(DKInputFieldSlot(inputContainer));
         DKRestoreAllCovers();
+        DKRestoreAllFoldMasks();
         return;
     }
 
@@ -662,7 +793,7 @@ static void DKCommentGlassSync(UIViewController *controller) API_AVAILABLE(ios(2
         gLastController = controller;
 
         DKEnsureBackmost(panel, panelGlass);
-        DKClearCoverLayers(panel);
+        DKClearCoverLayers(panel, kDKPanelCoverWalkDepth);
 
         // 先摆输入栏，再按它实际盖住的那一段给主面板玻璃定高。
         DKSyncInputGlass(inputContainer);
@@ -676,11 +807,8 @@ static void DKCommentGlassSync(UIViewController *controller) API_AVAILABLE(ios(2
         DKApplyGlassStyle(style, YES);
         DKMaterializeGlass(panelGlass, controller);
         if (DKViewIsVisible(inputContainer)) {
-            UIView *backdrop = nil;
-            UIView *field = nil;
-            DKResolveInputSlots(inputContainer, &backdrop, &field);
-            DKMaterializeSlotGlass(backdrop, controller);
-            DKMaterializeSlotGlass(field, controller);
+            DKMaterializeSlotGlass(inputContainer, controller);
+            DKMaterializeSlotGlass(DKInputFieldSlot(inputContainer), controller);
         }
         DKApplyEmoticonPanel();
     }
@@ -745,6 +873,47 @@ static void DKCommentGlassSync(UIViewController *controller) API_AVAILABLE(ios(2
 
 %end
 
+// 折叠提示条的收敛必须在布局落定之后算（判据是矩形包含），而折叠这件事本身就会把 Cell 从
+// 86 压到 58、**必然触发列表重新布局**——触发条件与要修的现象是同一件事，不存在错过。
+// 复用、滚动、缩放全屏半屏走的也是这一条；收敛幂等，来回切自愈。
+%group DKCommentFoldHook
+
+%hook AWEListKitMagicCollectionView
+
+- (void)layoutSubviews {
+    %orig;
+    if (!DKCommentGlassEnabled()) return;
+    Class foldClass = DKFoldDisplayClass();
+    if (!foldClass) return;
+    DKSyncFoldRowsIn(self, foldClass, 0);
+}
+
+%end
+
+%end
+
+// 艾特面板（点工具栏「@」拉起）的底色**唯一**来自 obtainPanelColor：39.9.0 反汇编实测本类内
+// 5 处引用，5 处的返回值都直接进 setBackgroundColor:（横排头像的 collection view、headerView、
+// 搜索结果表、两个 footer 与出错页），没有一处当文字色用。
+//
+// 从取色口返回透明，等于抖音无论什么时候画、画在哪个视图、画几次，拿到的都是透明色——
+// 不存在「我们扫完它才画」的时序洞，也不用为没见过的形态（搜索结果 / 加载 / 出错）补扫描。
+// 与 enableCommentRenderingOptimize: 同一种手法：只改纯取色方法的返回值，不吞有副作用的调用。
+%group DKCommentSearchPanelHook
+
+%hook AWECommentSearchViewController
+
+- (id)obtainPanelColor {
+    // 判据只问「输入区玻璃此刻在不在屏」，**不问自己在不在那棵树里**：这几个取色点是懒加载
+    // getter，第一次调用时 view 还没挂进输入容器，用层级判定会在冷启动首次原样返回白色，
+    // 正是要修的那个洞。艾特面板只为评论输入而生，输入区玻璃亮着时它就是被我们垫着的那块。
+    return DKCommentGlassEnabled() && DKUsableInputGlass() ? UIColor.clearColor : %orig;
+}
+
+%end
+
+%end
+
 // 热更新（AB 实验位 AWERenderingOptimize4）打开的评论区「不透明绘制优化」：抖音把面板底色写进
 // 列表容器与每一个 UIKit 文字视图的 backgroundColor。原版不透明面板上它们与面板同色、完全
 // 看不见，玻璃一挂就是「文字带底色块 + 整块面板变色」。从这个网关关掉，等于把收到热更新的设备
@@ -774,6 +943,7 @@ static void DKCommentGlassSync(UIViewController *controller) API_AVAILABLE(ios(2
 %ctor {
     gGlassCarriers = [NSHashTable weakObjectsHashTable];
     gClearedCovers = [NSHashTable weakObjectsHashTable];
+    gFoldMaskedViews = [NSHashTable weakObjectsHashTable];
 
     DKSettingsRegisterItem(@"评论区", ^AWESettingItemModel *{
         return DKMakeSwitch(
@@ -810,6 +980,15 @@ static void DKCommentGlassSync(UIViewController *controller) API_AVAILABLE(ios(2
 
         if (NSClassFromString(@"AWECommentMiniEmoticonPanelView")) {
             %init(DKCommentEmoticonHook);
+        }
+
+        if (NSClassFromString(@"AWEListKitMagicCollectionView") && DKFoldDisplayClass()) {
+            %init(DKCommentFoldHook);
+        }
+
+        Class searchPanel = NSClassFromString(@"AWECommentSearchViewController");
+        if ([searchPanel instancesRespondToSelector:@selector(obtainPanelColor)]) {
+            %init(DKCommentSearchPanelHook);
         }
 
         // 类或方法任一不在就不装：内部 generator 对不存在的方法会「新增」而不是「钩住」，
