@@ -730,106 +730,96 @@ NSString *DKRichBottomGradientStats(UIView *collectionView) {
 // IESLive 每轮布局都按 Cell 满高重算它，与钉位互相追赶，进直播频道即卡死、约 10s 被看门狗杀掉。
 // 位移量只由「Cell 满高 − 表撑高前的高度」决定，与被移动视图自己的 frame 无关，IESLive 怎么重排
 // 都算出同一个值，天然不成环；命中测试跟随 transform，按钮照常可点。
+//
+// 抬升目标只有两个，都是 4 层容器上的**具名槽位**，不做任何遍历：
+//
+//   controlContainer ── IESLiveStackView（满高，约束驱动）
+//                        ├─ IESLiveLayoutContainerView  顶部空槽（四份导出恒为 h=0）
+//                        └─ IESLiveLayoutContainerView  贴底信息块
+//                             └ 「点击进入直播间」/ 标签行 / 昵称 / 简介 / 静音键
+//   bottomDarkWatermark ── 贴底暗水印，与 chrome 不同槽位，单独判
+//
+// 0.5.6-beta3~beta7 走的是另一条路：按结构签名去**遍历找**那个贴底信息块。它在冷启动第一个直播上
+// 时灵时不灵（beta7 实测六次冷启动生效与不生效交替出现），原因是这个块由 IESLive 的排版系统
+// （IESLiveLayoutBaseContainer / IESLiveLayoutContainerItem，约束驱动）在直播间数据回来后**现场
+// 生成并插入**：它先在树外建好、在树外定好几何，最后才挂进 stack——树外的几何写入取不到容器，
+// 插入之后又不一定还有布局回合，换哪个触发点都会漏（容器布局 / 排版层布局 / setFrame: /
+// setBounds: / setCenter: / didMoveToSuperview 六处逐一实测过）。
+//
+// 而同一份导出里，**暗水印每一次都抬对了**——同一个触发点、同一个位移量，差别只在它是具名槽位、
+// 不需要等谁生成。所以问题从来不在触发时机，在目标发现方式：改成只认这两个槽位之后，
+// chrome 什么时候被排进来都无所谓，它进的是一个已经抬好的坐标系。
 
-// 贴底信息块在容器子树里的深度：容器 → 事件转发层 → IESLiveStackView → 信息块，取 4 留余量。
-static const NSUInteger kDKLiveChromeDepthLimit = 4;
-
-static char kDKLiveChromeAppliedKey;   // 挂 4 层容器：接管过没有，用来省掉绝大多数页面的遍历
-
-static Class DKLiveLayoutContainerClass(void) {
+static Class DKLivePreStreamContainerClass(void) {
     static Class cls;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ cls = NSClassFromString(@"IESLiveLayoutContainerView"); });
+    dispatch_once(&once, ^{
+        cls = NSClassFromString(@"AWELivePreStream4LayerContainerView");
+    });
     return cls;
 }
 
+// 同步跑了几次、首次接管了几个槽位。两个数分开记：只记接管数时，「钩子没被调用」与
+// 「调用了但位移还算不出来」是同一个 0，分不出该往哪边查。
+static NSUInteger gLiftRuns = 0;
+static NSUInteger gLiftTakeovers = 0;
+
+NSString *DKLiveChromeLiftStats(void) {
+    return [NSString stringWithFormat:@"容器布局 跑=%lu 接管=%lu",
+            (unsigned long)gLiftRuns, (unsigned long)gLiftTakeovers];
+}
+
 // 位移量 = Cell 满高 − 该表撑高前的高度；表没被撑高过（搜索页那种本就满高的）返回 0。
+// 容器还没跟着 cell 一起长高时同样返回 0：那一刻 chrome 仍贴着矮容器的底、本来就在原位，
+// 抬了会整体上飞一个底栏。判据按容器坐标量，位移就必须与容器同一轮才自洽。
 static CGFloat DKLiveChromeLift(UIView *container) {
     NSNumber *original = DKVideoFeedTableOriginalHeight(DKFeedTableForView(container));
     UIView *contentView = DKCellContentView(container);
     if (!original || !contentView) return 0.0;
 
-    return CGRectGetHeight(contentView.bounds) - original.doubleValue;
+    CGFloat full = CGRectGetHeight(contentView.bounds);
+    if (CGRectGetHeight(container.bounds) < full - kDKSignatureTolerance) return 0.0;
+    return full - original.doubleValue;
 }
 
-static BOOL DKLiveChromeIsManaged(UIView *view) {
-    return objc_getAssociatedObject(view, &kDKLiveChromeTransformKey) != nil;
-}
-
-// 目标底边在**容器**坐标里的位置。两点都很关键：
-//   · 取 identity frame，免得自己叠上去的位移污染判定；
-//   · 尺子是容器不是直接父层——贴底是相对的，IESLive 还停在撑高前那轮布局时，
-//     信息块同样贴着（更矮的）父层底边，按父层量会把没下移的块也抬走。
+// 目标底边在**容器**坐标里的位置。取 identity frame，免得自己叠上去的位移污染判定。
 static CGFloat DKLiveChromeBottom(UIView *view, UIView *container) {
     CGRect frame = DKIdentityFrameInSuperview(view);
     return [view.superview convertPoint:CGPointMake(0.0, CGRectGetMaxY(frame))
                                  toView:container].y;
 }
 
-// 贴底信息块的签名：IESLiveLayoutContainerView、贴容器底、顶边不在容器顶——与图文那条贴底压暗
-// 同一把尺子。「顶边不在容器顶」挡的是铺满整屏的浮层容器：它同样贴底，抬起来会把整层拽走。
-// 命中即止不再下钻——块内还有一层贴底子容器（简介行），它跟着块一起走。
-// 已接管的目标恒在列，否则关开关那一刻还原不掉。
-static void DKCollectLiveChrome(
-    UIView *root,
-    UIView *container,
-    NSUInteger depth,
-    NSMutableArray<UIView *> *output
-) {
-    Class containerCls = DKLiveLayoutContainerClass();
-    if (!containerCls || depth >= kDKLiveChromeDepthLimit) return;
-
-    CGFloat full = CGRectGetHeight(container.bounds);
-    for (UIView *subview in root.subviews) {
-        if (subview.hidden || subview.alpha <= 0.01) continue;
-
-        CGFloat bottom = DKLiveChromeBottom(subview, container);
-        CGFloat top = bottom - CGRectGetHeight(subview.bounds);
-        if (DKLiveChromeIsManaged(subview)
-            || ([subview isKindOfClass:containerCls]
-                && top > kDKSignatureTolerance
-                && fabs(bottom - full) <= kDKSignatureTolerance)) {
-            [output addObject:subview];
-            continue;
-        }
-        DKCollectLiveChrome(subview, container, depth + 1, output);
-    }
+// 暗水印贴底但留了 8pt 边距，只在它确实落进撑出来的那一段里才抬——它与 chrome 不在同一槽位，
+// 位置由 IESLive 直接排，不跟着控制层走。
+static BOOL DKLiveWatermarkNeedsLift(UIImageView *watermark, UIView *container, CGFloat lift) {
+    if (!watermark || watermark.hidden || lift <= kDKSignatureTolerance) return NO;
+    return DKLiveChromeBottom(watermark, container)
+        > CGRectGetHeight(container.bounds) - lift + kDKSignatureTolerance;
 }
 
-static NSArray<UIView *> *DKLiveChromeTargets(
-    AWELivePreStream4LayerContainerView *container,
-    CGFloat lift
-) {
-    NSMutableArray<UIView *> *targets = [NSMutableArray array];
-    DKCollectLiveChrome(container, container, 0, targets);
+// 该抬就抬、不该抬就还原，两个槽位共用。幂等：值没变不写。
+static void DKApplyLiveLift(UIView *target, CGFloat lift, BOOL wanted) {
+    if (!target) return;
 
-    // 暗水印贴底但留了 8pt 边距，贴底签名认不出它，按槽位取；只在它确实落进撑出来的那一段里才算。
-    UIImageView *watermark = container.bottomDarkWatermark;
-    if (watermark && !watermark.hidden
-        && (DKLiveChromeIsManaged(watermark)
-            || DKLiveChromeBottom(watermark, container)
-                > CGRectGetHeight(container.bounds) - lift + kDKSignatureTolerance)) {
-        [targets addObject:watermark];
+    BOOL managed = objc_getAssociatedObject(target, &kDKLiveChromeTransformKey) != nil;
+    if (wanted && DKApplyVerticalLift(target, &kDKLiveChromeTransformKey, lift)) {
+        [gDKManagedVisualViews addObject:target];
+        if (!managed) gLiftTakeovers++;
+        return;
     }
-    return targets;
+    DKRestoreTransformBaseline(target, &kDKLiveChromeTransformKey);
 }
 
+// 位移为 0（表本就满高，或容器还没跟着 cell 长高）时两个槽位都走还原分支，没接管过就是空转。
+// 目标是两个具名属性、没有遍历可省，所以不再挂「接管过没有」的标记来提前退出。
 static void DKSyncLiveChrome(AWELivePreStream4LayerContainerView *container) {
-    CGFloat lift = DKVideoFullscreenOn() ? DKLiveChromeLift(container) : 0.0;
-    BOOL applied = objc_getAssociatedObject(container, &kDKLiveChromeAppliedKey) != nil;
-    // 表没被撑高、也没接管过的直播预览在这里退出，不做任何遍历。
-    if (lift <= kDKSignatureTolerance && !applied) return;
+    gLiftRuns++;
 
-    for (UIView *target in DKLiveChromeTargets(container, lift)) {
-        if (DKApplyVerticalLift(target, &kDKLiveChromeTransformKey, lift)) {
-            [gDKManagedVisualViews addObject:target];
-            continue;
-        }
-        DKRestoreTransformBaseline(target, &kDKLiveChromeTransformKey);
-    }
-    objc_setAssociatedObject(container, &kDKLiveChromeAppliedKey,
-                             lift > kDKSignatureTolerance ? @YES : nil,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    CGFloat lift = DKVideoFullscreenOn() ? DKLiveChromeLift(container) : 0.0;
+    UIImageView *watermark = container.bottomDarkWatermark;
+
+    DKApplyLiveLift(container.controlContainer, lift, lift > kDKSignatureTolerance);
+    DKApplyLiveLift(watermark, lift, DKLiveWatermarkNeedsLift(watermark, container, lift));
 }
 
 static NSString *DKLiveSlotDesc(UIView *slot) {
@@ -838,8 +828,22 @@ static NSString *DKLiveSlotDesc(UIView *slot) {
             NSStringFromClass(slot.class), slot, NSStringFromCGRect(slot.frame)];
 }
 
+// 抬升目标逐个给出 identity frame 与实际底边：identity 是抖音排的位置，实际底边是抬完的结果。
+static NSString *DKLiveLiftDesc(UIView *target, UIView *contentView) {
+    if (!target) return @"(nil)\n";
+
+    CGFloat bottom = contentView
+        ? [target.superview convertPoint:CGPointMake(0.0, CGRectGetMaxY(target.frame))
+                                  toView:contentView].y
+        : 0.0;
+    return [NSString stringWithFormat:@"%@ %p  identity=%@  ty=%.1f  实际底边=%.1f\n",
+            NSStringFromClass(target.class), target,
+            NSStringFromCGRect(DKIdentityFrameInSuperview(target)),
+            target.transform.ty, bottom];
+}
+
 NSString *DKLiveChromeStats(UIView *view) {
-    Class containerCls = NSClassFromString(@"AWELivePreStream4LayerContainerView");
+    Class containerCls = DKLivePreStreamContainerClass();
     if (!containerCls || ![view isKindOfClass:containerCls]) return @"  (不是 4 层容器)\n";
 
     AWELivePreStream4LayerContainerView *container =
@@ -857,22 +861,9 @@ NSString *DKLiveChromeStats(UIView *view) {
     [out appendFormat:@"  left    = %@\n", DKLiveSlotDesc(container.leftContainer)];
     [out appendFormat:@"  center  = %@\n", DKLiveSlotDesc(container.centerContainer)];
     [out appendFormat:@"  bottom  = %@\n", DKLiveSlotDesc(container.bottomContainer)];
-    [out appendFormat:@"  control = %@\n", DKLiveSlotDesc(container.controlContainer)];
     [out appendFormat:@"  渐变层  = %@\n", DKLiveSlotDesc(container.gradientContainerView)];
-    [out appendFormat:@"  暗水印  = %@\n", DKLiveSlotDesc(container.bottomDarkWatermark)];
-
-    NSArray<UIView *> *targets = DKLiveChromeTargets(container, DKLiveChromeLift(container));
-    [out appendFormat:@"  抬升目标 × %lu\n", (unsigned long)targets.count];
-    for (UIView *target in targets) {
-        CGRect identity = DKIdentityFrameInSuperview(target);
-        CGFloat bottom = contentView
-            ? [target.superview convertPoint:CGPointMake(0.0, CGRectGetMaxY(target.frame))
-                                      toView:contentView].y
-            : 0.0;
-        [out appendFormat:@"    %@ %p  identity=%@  ty=%.1f  实际底边=%.1f\n",
-         NSStringFromClass(target.class), target, NSStringFromCGRect(identity),
-         target.transform.ty, bottom];
-    }
+    [out appendFormat:@"  控制层  = %@", DKLiveLiftDesc(container.controlContainer, contentView)];
+    [out appendFormat:@"  暗水印  = %@", DKLiveLiftDesc(container.bottomDarkWatermark, contentView)];
     return out;
 }
 

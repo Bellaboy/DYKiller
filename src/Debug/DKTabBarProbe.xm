@@ -893,6 +893,8 @@ static void DKProbeAppendLivePreview(NSMutableString *out) {
     for (UIView *container in containers) {
         [out appendFormat:@"%@\n%@", DKProbeDesc(container), DKLiveChromeStats(container)];
     }
+    // 两个同步点分开计：冷启动第一个直播的抬升必然出自槽位那一处，它恒为 0 就是那条路没走通。
+    [out appendFormat:@"抬升命中统计: %@\n", DKLiveChromeLiftStats()];
 }
 
 #pragma mark - 报告

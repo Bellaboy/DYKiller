@@ -70,6 +70,9 @@ NSString *DKRichBottomGradientStats(UIView *collectionView);
 /// 参数是 AWELivePreStream4LayerContainerView，返回多行文本。供探针核对。
 NSString *DKLiveChromeStats(UIView *container);
 
+/// 直播预览 HUD 抬升两个同步点各自的首次接管数（容器布局 / 槽位布局）。供探针核对。
+NSString *DKLiveChromeLiftStats(void);
+
 /// 首页/朋友页 HUD 钉位：撑高 feed 表后把 HUD 高度按回撑高前的值。
 /// 不在已撑高的 feed 内（含全部详情页）返回 CGRectNull 放行。
 CGRect DKFeedHUDAdjustFrame(UIView *view, CGRect frame);
