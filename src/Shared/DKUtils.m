@@ -8,6 +8,8 @@
 #import "DKKeys.h"
 #import "DouyinHeaders.h"
 
+#import <objc/runtime.h>
+
 BOOL DKPrefBool(NSString *key) {
     if (DKGlassIsGatedKey(key) && !DKGlassOSAvailable()) return NO;
     return [[NSUserDefaults standardUserDefaults] boolForKey:key];
@@ -63,6 +65,82 @@ static const CGFloat kDKGlassDarkTintAlpha = 0.30;
 UIColor *DKGlassTintForStyle(UIUserInterfaceStyle style) {
     if (style != UIUserInterfaceStyleDark) return nil;
     return [UIColor colorWithWhite:0.0 alpha:kDKGlassDarkTintAlpha];
+}
+
+#pragma mark - 玻璃上的文字
+
+// 黑系判据的两个阈值：抖音标题色 #161823 明度 0.137、饱和度 0.37；
+// 同处的蓝色 #04498D 明度 0.553、粉色 #FE2C55 明度 0.996，按明度就能分开。
+static const CGFloat kDKGlassInkBrightness = 0.35;
+static const CGFloat kDKGlassInkSaturation = 0.50;
+
+// 遍历深度：通知横幅最深处是白槽 → 栈 → CommonView → 容器 → 栈 → 栈 → 标题项 → 文字，
+// 展开态还会更深，留出余量。
+static const NSUInteger kDKGlassInkDepth = 10;
+
+static char kDKInkOriginalKey;
+static char kDKInkAppliedKey;
+
+BOOL DKGlassColorIsInk(UIColor *color) {
+    if (!color) return NO;
+
+    CGFloat hue = 0.0;
+    CGFloat saturation = 0.0;
+    CGFloat brightness = 0.0;
+    CGFloat alpha = 0.0;
+    if (![color getHue:&hue saturation:&saturation brightness:&brightness alpha:&alpha]) {
+        CGFloat white = 0.0;
+        if (![color getWhite:&white alpha:&alpha]) return NO;
+        saturation = 0.0;
+        brightness = white;
+    }
+    return alpha >= 0.5
+        && brightness <= kDKGlassInkBrightness
+        && saturation <= kDKGlassInkSaturation;
+}
+
+// 先按目标外观解析再判定：宿主那个色是静态还是动态都能得到正确结果。
+UIColor *DKGlassInkTextColor(UIColor *original, BOOL clear, UIUserInterfaceStyle style) {
+    if (!original) return nil;
+    UITraitCollection *traits = [UITraitCollection traitCollectionWithUserInterfaceStyle:style];
+    UIColor *resolved = [original resolvedColorWithTraitCollection:traits];
+    if (!DKGlassColorIsInk(resolved)) return original;
+    if (!clear && style != UIUserInterfaceStyleDark) return original;
+    return [UIColor colorWithWhite:1.0 alpha:CGColorGetAlpha(resolved.CGColor)];
+}
+
+static void DKGlassWalkLabels(UIView *view, NSUInteger depth, void (^block)(UILabel *label)) {
+    if (!view || depth > kDKGlassInkDepth) return;
+    if ([view isKindOfClass:[UIControl class]]) return;
+    if ([view isKindOfClass:[UILabel class]]) block((UILabel *)view);
+    for (UIView *child in view.subviews) DKGlassWalkLabels(child, depth + 1, block);
+}
+
+void DKGlassApplyInkText(UIView *root, BOOL clear, UIUserInterfaceStyle style) {
+    DKGlassWalkLabels(root, 0, ^(UILabel *label) {
+        UIColor *current = label.textColor;
+        UIColor *original = objc_getAssociatedObject(label, &kDKInkOriginalKey);
+        UIColor *applied = objc_getAssociatedObject(label, &kDKInkAppliedKey);
+        // 当前色既不是原色也不是我们写进去的，说明宿主改写过，重新记原色。
+        if (!original || (![current isEqual:original] && ![current isEqual:applied])) {
+            original = current;
+            objc_setAssociatedObject(label, &kDKInkOriginalKey,
+                                     original, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        UIColor *want = DKGlassInkTextColor(original, clear, style);
+        if (want && ![current isEqual:want]) label.textColor = want;
+        objc_setAssociatedObject(label, &kDKInkAppliedKey, want, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    });
+}
+
+void DKGlassRestoreInkText(UIView *root) {
+    DKGlassWalkLabels(root, 0, ^(UILabel *label) {
+        UIColor *original = objc_getAssociatedObject(label, &kDKInkOriginalKey);
+        if (!original) return;
+        label.textColor = original;
+        objc_setAssociatedObject(label, &kDKInkOriginalKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(label, &kDKInkAppliedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    });
 }
 
 #pragma mark - Cell 几何

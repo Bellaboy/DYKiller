@@ -40,6 +40,8 @@ static NSHashTable *gGlassCarriers;
 static NSHashTable<AWEInnerNotificationContainerView *> *gContainers;
 static NSHashTable<AWEInnerPushCommonView *> *gCommonViews;
 static BOOL gEverAttached = NO;
+// 我们自己写 textColor 会再次触发 setTextColor: 钩子，用它挡住重入。
+static BOOL gInkReapplying = NO;
 static __weak UIWindowScene *gObservedScene = nil;
 static UIUserInterfaceStyle gGlassStyle = UIUserInterfaceStyleUnspecified;
 
@@ -127,10 +129,23 @@ static BOOL DKNotiGlassNeedsUpdate(UIVisualEffectView *glass, BOOL clear, UIUser
     return !((current.tintColor == want) || [current.tintColor isEqual:want]);
 }
 
+static UIView *DKNotiSlot(AWEInnerNotificationContainerView *container);
+
 static void DKNotiApplyStyle(UIUserInterfaceStyle style, BOOL animated) API_AVAILABLE(ios(26.0)) {
     if (style == UIUserInterfaceStyleUnspecified) return;
     gGlassStyle = style;
+    // 场景 trait 回调在关开关后仍会来，这里不能再往回写。
+    if (!DKNotiEnabled()) return;
     BOOL clear = DKNotiUsesClear();
+
+    // 深浅切换时横幅可能正在场，文字要跟着材质一起换。
+    for (AWEInnerPushCommonView *common in gCommonViews.allObjects) {
+        DKGlassApplyInkText(common, clear, style);
+    }
+    for (AWEInnerNotificationContainerView *container in gContainers.allObjects) {
+        DKGlassApplyInkText(DKNotiSlot(container), clear, style);
+    }
+
     BOOL needs = NO;
     for (UIVisualEffectView *glass in gGlassCarriers.allObjects) {
         if (DKNotiGlassNeedsUpdate(glass, clear, style)) {
@@ -354,6 +369,7 @@ static UIVisualEffectView *DKNotiAttachCard(AWEInnerNotificationContainerView *c
 static void DKNotiDetachCard(AWEInnerNotificationContainerView *container) {
     UIView *slot = DKNotiSlot(container);
     if (!slot) return;
+    DKGlassRestoreInkText(slot);
     UIView *glass = objc_getAssociatedObject(slot, &kSlotGlassKey);
     [gGlassCarriers removeObject:glass];
     [glass removeFromSuperview];
@@ -572,6 +588,31 @@ static void DKNotiHideHintLabel(UILabel *label) {
     gEverAttached = YES;
 }
 
+#pragma mark - 迟到的文字色
+
+// 副标题的文案和色值在同步之后才写进去：横幅首帧只有用户名变了色，正文要拖一下
+// （拖动触发 layout 才重新扫）才跟上。这里在写入点当场补，不等下一次布局。
+// 全应用的 UILabel 都会走到：横幅住在自己那个 999 窗口里，一次 window 判定就挡掉绝大多数；
+// 还没挂进窗口的横幅取不到 window，退回「当前有没有横幅在场」再细查。
+static void DKNotiReapplyInk(UILabel *label) {
+    if (gInkReapplying) return;
+    if (![label.window isKindOfClass:%c(AWEInnerNotificationWindow)]
+        && gContainers.count == 0 && gCommonViews.count == 0) {
+        return;
+    }
+    if (!DKNotiEnabled()) return;
+
+    for (UIView *node = label; node; node = node.superview) {
+        // 按钮标题由 UIButtonConfiguration 管，写 textColor 会被配置刷掉，两边打架。
+        if ([node isKindOfClass:UIControl.class]) return;
+        if (![node isKindOfClass:%c(AWEInnerNotificationContainerView)]) continue;
+        gInkReapplying = YES;
+        DKGlassApplyInkText(label, DKNotiUsesClear(), DKNotiStyleForView(label));
+        gInkReapplying = NO;
+        return;
+    }
+}
+
 static void DKNotiApplyHint(AWEInnerPushCommonView *common) {
     UIView *root = ([common respondsToSelector:@selector(middleContentTextStackView)]
                     && common.middleContentTextStackView)
@@ -599,6 +640,7 @@ static void DKNotiRestoreCommon(AWEInnerPushCommonView *common) {
         DKNotiRestoreBadge(common.leftExtraIconBackgroundView);
     }
     DKNotiRestoreHint(common);
+    DKGlassRestoreInkText(common);
     [gCommonViews removeObject:common];
 }
 
@@ -630,6 +672,7 @@ static void DKNotiSyncCommon(AWEInnerPushCommonView *common) API_AVAILABLE(ios(2
 
     [gCommonViews addObject:common];
     DKNotiApplyHint(common);
+    DKGlassApplyInkText(common, DKNotiUsesClear(), DKNotiStyleForView(common));
     if ([common respondsToSelector:@selector(rightActionButton)]) {
         DKNotiApplyAction(common.rightActionButton);
     }
@@ -659,6 +702,8 @@ static void DKNotiSyncContainer(AWEInnerNotificationContainerView *container)
     [CATransaction setDisableActions:YES];
     UIVisualEffectView *card = DKNotiAttachCard(container, slot);
     DKNotiSyncCommon(DKNotiCommonIn(container, 0));
+    // 从白槽起走一遍：点赞、评论、直播这类不带 AWEInnerPushCommonView 的横幅也覆盖到。
+    DKGlassApplyInkText(slot, DKNotiUsesClear(), style);
     [CATransaction commit];
 
     if (card) {
@@ -730,14 +775,23 @@ static void DKNotiRefreshVisible(void) {
 
 - (void)setText:(NSString *)text {
     %orig;
-    if (!DKNotiEnabled() || !DKNotiIsHintText(text) || !DKNotiCommonOf(self)) return;
-    DKNotiHideHintLabel(self);
+    if (DKNotiEnabled() && DKNotiIsHintText(text) && DKNotiCommonOf(self)) {
+        DKNotiHideHintLabel(self);
+    }
+    DKNotiReapplyInk(self);
 }
 
 - (void)setAttributedText:(NSAttributedString *)text {
     %orig;
-    if (!DKNotiEnabled() || !DKNotiIsHintText(text.string) || !DKNotiCommonOf(self)) return;
-    DKNotiHideHintLabel(self);
+    if (DKNotiEnabled() && DKNotiIsHintText(text.string) && DKNotiCommonOf(self)) {
+        DKNotiHideHintLabel(self);
+    }
+    DKNotiReapplyInk(self);
+}
+
+- (void)setTextColor:(UIColor *)color {
+    %orig;
+    DKNotiReapplyInk(self);
 }
 
 - (void)setHidden:(BOOL)hidden {

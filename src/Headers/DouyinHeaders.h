@@ -196,6 +196,21 @@
 - (void)setTabBackgroundColor:(id)color;
 @end
 
+// IM 通用底部提示壳，直接挂在窗口的 UITransitionView 下，不属于任何 VC。
+// 白底 + 圆角 12，contentView 是本次要接管的分享提示。
+@interface AWEIMBottomTipsContainerView : UIView
+@property (nonatomic, strong) UIView *contentView;
+- (void)show;
+@end
+
+// 分享成功提示「已私信给 xxx / 捎句话 >」：头像 28×28、标题近黑、tips 与 tag 为彩色。
+@interface AWEIMBottomShareTipsView : UIView
+@property (nonatomic, strong) UIImageView *imageView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *tipsLabel;
+- (void)updateTipsLabelWithText:(id)text;
+@end
+
 #pragma mark - 应用内通知功能组用到的类
 
 @interface AWEInnerNotificationContainerView : UIView

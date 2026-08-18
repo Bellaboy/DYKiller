@@ -30,6 +30,21 @@ BOOL DKColorIsOpaqueBlack(UIColor *color);
 /// Clear 对 overrideUserInterfaceStyle 不敏感，深色只能靠染色。悬浮底栏与评论面板共用此口径。
 UIColor *DKGlassTintForStyle(UIUserInterfaceStyle style);
 
+/// 该颜色是否为黑系文字色。抖音主文字色 #161823 是偏蓝的近黑（饱和度 0.37），
+/// 只看饱和度会误判成彩色，故按明度与饱和度双阈值判定。
+BOOL DKGlassColorIsInk(UIColor *color);
+
+/// 玻璃上的目标文字色：彩色与浅色原样返回；黑系在 Clear 下转白、Regular 下只有深色档转白。
+/// 转白保留原色 alpha，保住主次文字的层级。
+UIColor *DKGlassInkTextColor(UIColor *original, BOOL clear, UIUserInterfaceStyle style);
+
+/// 把 root 子树里的黑系文字改成 DKGlassInkTextColor 的结果，原色记在关联对象上。
+/// 不下探 UIControl：按钮标题由 UIButtonConfiguration 管，直接写 textColor 会被它覆盖。
+void DKGlassApplyInkText(UIView *root, BOOL clear, UIUserInterfaceStyle style);
+
+/// 还原 DKGlassApplyInkText 改过的文字色。
+void DKGlassRestoreInkText(UIView *root);
+
 /// 从 view 自身起向上找所在 Cell 的 contentView；不在 Cell 内返回 nil。
 UIView *DKCellContentView(UIView *view);
 

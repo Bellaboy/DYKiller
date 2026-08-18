@@ -1128,7 +1128,7 @@ static void DKShareRefreshVisible(void) {
         AWESettingItemModel *item = DKMakeSwitch(
             DKKeySharePanelGlass,
             @"分享面板液态玻璃",
-            @"把分享卡片换成 iOS 26 系统液态玻璃；默认 Regular"
+            @"把分享卡片与分享成功提示换成 iOS 26 系统液态玻璃；默认 Regular"
         );
         void (^origBlock)(void) = [item.switchChangedBlock copy];
         item.switchChangedBlock = ^{
