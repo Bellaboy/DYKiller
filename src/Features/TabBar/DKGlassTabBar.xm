@@ -65,6 +65,12 @@ static __weak AWENormalModeTabBar *gDouyinBar = nil;
 // 已挂上深浅色监听的场景，避免重复注册。
 static __weak UIWindowScene *gObservedScene = nil;
 
+// 评论区右滑关闭时，UIKit 会先开始一个交互式转场，手指抬起后才决定完成或取消。
+// 这里仅记录当前交互转场及其开始时的底栏状态，避免把普通转场或其他原因的隐藏误当成评论关闭。
+static __weak id<UIViewControllerTransitionCoordinator> gCommentDismissCoordinator = nil;
+static BOOL gCommentDismissWasHidden = NO;
+static BOOL gCommentDismissWasTransparent = NO;
+
 // 拍摄圆键及其内容。
 static UIVisualEffectView *gPlusKey = nil;
 static UIImageView *gPlusIcon = nil;
@@ -766,7 +772,8 @@ static void DKGlassLayoutGlass(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios
 }
 
 // 抖音自绘底栏的内容隐去：背景层与按钮都不可见、不接收触摸，交互交给覆盖其上的玻璃底栏。
-// 只动内容，不动底栏自身的 hidden/alpha——那是抖音的显隐状态，玻璃底栏靠继承跟随它。
+// 常规布局只动内容，不动底栏自身的 hidden/alpha——那是抖音的显隐状态，玻璃底栏靠继承跟随它。
+// 交互式评论关闭完成的瞬间由 DKGlassRevealAfterCommentDismissal 做一次受控例外。
 //
 // 驱动点是抖音底栏的 layoutSubviews，每帧都会走到这里，因此所有写入都必须先比较：
 // 值没变还照写会让 UITabBar 反复重新布局，把系统的选中状态与长按拖动手势冲掉。
@@ -869,6 +876,43 @@ void DKGlassTabBarRefresh(void) {
     AWENormalModeTabBar *bar = gDouyinBar;
     if (!bar) return;
     if (@available(iOS 26.0, *)) DKGlassUpdate(bar);
+}
+
+static void DKGlassRevealAfterCommentDismissal(void) API_AVAILABLE(ios(26.0));
+
+void DKGlassTabBarObserveCommentDismissal(UIViewController *commentController) {
+    if (!commentController) return;
+    if (@available(iOS 26.0, *)) {
+        id<UIViewControllerTransitionCoordinator> coordinator = commentController.transitionCoordinator;
+        // 只有半屏评论区的手势关闭属于这里的实验范围；普通 push/pop 不做任何显隐改写。
+        if (!coordinator || !coordinator.isInteractive) return;
+        if (gCommentDismissCoordinator == coordinator) return;
+
+        gCommentDismissCoordinator = coordinator;
+        gCommentDismissWasHidden = gDouyinBar.isHidden;
+        gCommentDismissWasTransparent = gDouyinBar.alpha <= 0.01;
+
+        [coordinator notifyWhenInteractionChangesUsingBlock:
+            ^(__unused id<UIViewControllerTransitionCoordinatorContext> context) {
+                BOOL cancelled = context.isCancelled;
+                BOOL shouldReveal = !cancelled
+                    && (gCommentDismissWasHidden || gCommentDismissWasTransparent);
+                gCommentDismissCoordinator = nil;
+                if (shouldReveal) DKGlassRevealAfterCommentDismissal();
+            }];
+    }
+}
+
+static void DKGlassRevealAfterCommentDismissal(void) API_AVAILABLE(ios(26.0)) {
+    AWENormalModeTabBar *bar = gDouyinBar;
+    if (!bar || !gBar || !DKGlassTabBarEnabled() || gBar.superview != bar) return;
+
+    // 玻璃底栏是原生底栏的子视图，单独显示 gBar 无法穿透父视图的 hidden/alpha。
+    // 抖音自绘内容此前已被 DKGlassSetDouyinContentVisible 隐去，因此这里只恢复父容器可见性。
+    if (bar.isHidden) bar.hidden = NO;
+    if (bar.alpha <= 0.01) bar.alpha = 1.0;
+    [bar setNeedsLayout];
+    DKGlassUpdate(bar);
 }
 
 #pragma mark - Hook

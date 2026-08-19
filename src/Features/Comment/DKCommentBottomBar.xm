@@ -10,6 +10,7 @@
 #import "DKKeys.h"
 #import "DKSettings.h"
 #import "DKUtils.h"
+#import "DKGlassTabBar.h"
 #import <math.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -417,6 +418,11 @@ static void DKSetCommentEditing(AWECommentContainerViewController *controller, B
 }
 
 %hook AWECommentContainerViewController
+
+- (void)viewWillDisappear:(BOOL)animated {
+    %orig;
+    DKGlassTabBarObserveCommentDismissal(self);
+}
 
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
