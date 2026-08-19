@@ -7,6 +7,7 @@
 //
 
 #import "DKTabBarProbe.h"
+#import "DKPlusIcon.h"
 #import "DouyinHeaders.h"
 #import "DKCommentGlass.h"
 #import "DKGlassFlexView.h"
@@ -213,6 +214,17 @@ static void DKProbeAppendPlusKey(NSMutableString *out) {
     if (@available(iOS 26.0, *)) {
         [out appendFormat:@"  圆角有效半径       = %.1f（直径 %.1f 的一半即为正圆）\n",
          [key effectiveRadiusForCorner:UIRectCornerTopLeft], CGRectGetWidth(key.bounds)];
+    }
+    // 自定义图标走原色不模板化，内缩也换一档；这两个读数是它有没有生效的唯一凭据。
+    // 内缩取 DKGlassPlusIconInset()，与实际布局同源，不在这里另写一个数字。
+    UIImage *custom = DKPlusIconCustom();
+    if (custom) {
+        [out appendFormat:@"  自定义图标         = 已设置 %.0f×%.0f  ·  图标内缩 %.1f\n",
+         custom.size.width * custom.scale, custom.size.height * custom.scale,
+         DKGlassPlusIconInset()];
+    } else {
+        [out appendFormat:@"  自定义图标         = 未设置  ·  图标内缩 %.1f\n",
+         DKGlassPlusIconInset()];
     }
 }
 

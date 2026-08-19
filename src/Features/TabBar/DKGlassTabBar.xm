@@ -16,6 +16,7 @@
 
 #import "DKGlassTabBar.h"
 #import "DKAudioVisualizer.h"
+#import "DKPlusIcon.h"
 #import "DouyinHeaders.h"
 #import "DKGlassGuard.h"
 #import "DKKeys.h"
@@ -43,6 +44,8 @@ static const CGFloat kDKTitleFontSize = 15.0;
 static const CGFloat kDKPlusKeyGap = 12.0;
 // 拍摄图标在圆键内的四周留白。
 static const CGFloat kDKPlusIconInset = 14.0;
+// 自定义图标本身就是一枚圆，只留一圈窄边把它嵌进圆键，不需要给字形留呼吸空间。
+static const CGFloat kDKPlusIconCustomInset = 7.0;
 // platter 还没建起来时的兜底几何（beta7 实测值），次帧即被真实值取代。
 static const CGFloat kDKPlatterFallbackHeight = 62.0;
 static const CGFloat kDKPlatterFallbackInset = 21.0;
@@ -354,7 +357,21 @@ static UIImage *DKGlassTrimTransparent(UIImage *image) {
 
 // 图标同样走模板图：抖音会随页面在白/黑两版图标间切换，只取 alpha 则两版形状一致，
 // 着色交给圆键的 trait，浅色玻璃上不会出现看不见的白图标。
+CGFloat DKGlassPlusIconInset(void) {
+    return DKPlusIconCustom() ? kDKPlusIconCustomInset : kDKPlusIconInset;
+}
+
 static void DKGlassSyncPlusIcon(UIView *button) {
+    // 自定义图标是用户选的照片，两道加工都要跳过：模板化只取 alpha，会把彩色抹成单色块；
+    // 圆形 alpha 已在裁剪时烘进图内，再裁一次透明包围盒会毁掉 3pt 均匀留边的前提。
+    UIImage *custom = DKPlusIconCustom();
+    if (custom) {
+        if (custom == gPlusSourceIcon) return;
+        gPlusSourceIcon = custom;
+        gPlusIcon.image = custom;
+        return;
+    }
+
     UIImage *source = DKGlassPlusSourceIcon(button);
     if (!source || source == gPlusSourceIcon) return;
     gPlusSourceIcon = source;
@@ -593,7 +610,8 @@ static void DKGlassLayoutGlass(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios
     if (!CGRectEqualToRect(gPlusKey.frame, keyFrame)) gPlusKey.frame = keyFrame;
 
     CGRect bounds = gPlusKey.bounds;
-    CGRect iconFrame = CGRectInset(bounds, kDKPlusIconInset, kDKPlusIconInset);
+    CGFloat iconInset = DKGlassPlusIconInset();
+    CGRect iconFrame = CGRectInset(bounds, iconInset, iconInset);
     if (!CGRectEqualToRect(gPlusIcon.frame, iconFrame)) gPlusIcon.frame = iconFrame;
     if (!CGRectEqualToRect(gPlusHit.frame, bounds)) gPlusHit.frame = bounds;
 
@@ -693,6 +711,12 @@ static void DKGlassUpdate(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios(26.0
     DKGlassSetDouyinContentVisible(douyinBar, buttons, NO);
     // 放在最后：可视化的环绕轮廓要用 DKGlassLayoutGlass 刚算完的胶囊与圆键几何。
     DKAudioVisualizerLayout(douyinBar);
+}
+
+void DKGlassTabBarRefresh(void) {
+    AWENormalModeTabBar *bar = gDouyinBar;
+    if (!bar) return;
+    if (@available(iOS 26.0, *)) DKGlassUpdate(bar);
 }
 
 #pragma mark - Hook

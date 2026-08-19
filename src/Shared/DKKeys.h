@@ -44,6 +44,9 @@ static NSString *const DKKeyInnerNotiCorner     = @"DYKillerInnerNotiCorner";
 
 static NSString *const DKKeyGlassTabBar      = @"DYKillerGlassTabBar";
 static NSString *const DKKeyGlassTabBarClear = @"DYKillerGlassTabBarClear";
+// 自定义拍摄图标：图片本体存文件（见 DKPlusIcon.xm），这个键只作设置项 identifier，
+// 供液态玻璃守卫认出并在低系统上灰显，NSUserDefaults 里不写值。
+static NSString *const DKKeyPlusIcon         = @"DYKillerPlusIcon";
 
 #pragma mark - 功能组：音频可视化
 

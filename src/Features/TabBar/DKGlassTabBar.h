@@ -17,6 +17,12 @@ extern "C" {
 /// 当前挂载中的玻璃底栏；功能关闭时为 nil。
 UITabBar *DKGlassTabBarCurrent(void);
 
+/// 按当前设置重跑一次挂载与几何。给设置页用：改完立刻生效，不必等抖音下一次布局。
+void DKGlassTabBarRefresh(void);
+
+/// 拍摄图标当前用的四周内缩：抖音原图与自定义圆形图标是两档。探针据此报告几何。
+CGFloat DKGlassPlusIconInset(void);
+
 /// 当前挂载中的拍摄圆键；功能关闭时为 nil。
 UIVisualEffectView *DKGlassPlusKeyCurrent(void);
 

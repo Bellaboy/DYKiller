@@ -181,20 +181,44 @@ AWESettingItemModel *DKMakePercentSlider(NSString *key, NSString *title, NSStrin
                                                 message:message
                                          preferredStyle:UIAlertControllerStyleAlert];
 
+        // 读数与滑块都用约束定位：box.view 建出来时是整屏宽，之后被 alert 压到自己的
+        // 内容宽度，写死 frame 会在两侧留下不对称的空当。
         UIViewController *box = [[UIViewController alloc] init];
-        box.preferredContentSize = CGSizeMake(250, 44);
-        UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(8.0, 7.0, 234.0, 30.0)];
+        box.preferredContentSize = CGSizeMake(250.0, 68.0);
+
+        UILabel *readout = [[UILabel alloc] init];
+        readout.text = DKPercentSliderDetail(value);
+        readout.textAlignment = NSTextAlignmentCenter;
+        readout.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+        readout.translatesAutoresizingMaskIntoConstraints = NO;
+        [box.view addSubview:readout];
+
+        UISlider *slider = [[UISlider alloc] init];
         slider.minimumValue = 0.0;
         slider.maximumValue = 100.0;
         slider.value = (float)value;
         slider.continuous = YES;
+        slider.translatesAutoresizingMaskIntoConstraints = NO;
         [box.view addSubview:slider];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [readout.topAnchor constraintEqualToAnchor:box.view.topAnchor constant:4.0],
+            [readout.leadingAnchor constraintEqualToAnchor:box.view.leadingAnchor constant:16.0],
+            [readout.trailingAnchor constraintEqualToAnchor:box.view.trailingAnchor constant:-16.0],
+            [readout.heightAnchor constraintEqualToConstant:22.0],
+            [slider.topAnchor constraintEqualToAnchor:readout.bottomAnchor constant:6.0],
+            [slider.leadingAnchor constraintEqualToAnchor:box.view.leadingAnchor constant:16.0],
+            [slider.trailingAnchor constraintEqualToAnchor:box.view.trailingAnchor constant:-16.0],
+            [slider.heightAnchor constraintEqualToConstant:30.0]
+        ]];
         [alert setValue:box forKey:@"contentViewController"];
 
         void (^applyValue)(float, BOOL) = ^(float raw, BOOL finish) {
             NSInteger percent = (NSInteger)lroundf(raw);
             if (percent < 0) percent = 0;
             if (percent > 100) percent = 100;
+            // 拖动途中就把读数写上去，用的是和设置行同一套文案，两处不会出现两种说法。
+            readout.text = DKPercentSliderDetail(percent);
             [NSUserDefaults.standardUserDefaults setInteger:percent forKey:key];
             if (onChangeCopy) onChangeCopy(percent);
             if (!finish) return;
@@ -216,6 +240,33 @@ AWESettingItemModel *DKMakePercentSlider(NSString *key, NSString *title, NSStrin
         [presenter presentViewController:alert animated:YES completion:nil];
     };
     return item;
+}
+
+#pragma mark - 动作项工厂
+
+AWESettingItemModel *DKMakeAction(NSString *key, NSString *title, NSString *detail,
+                                  void (^onTap)(AWESettingItemModel *item, UIViewController *presenter)) {
+    AWESettingItemModel *item = [[%c(AWESettingItemModel) alloc] init];
+    item.identifier = key;
+    item.title = title;
+    item.detail = detail ?: @"";
+    item.type = 0;
+    item.cellType = 26;
+    item.colorStyle = 0;
+    item.isEnable = YES;
+
+    __weak AWESettingItemModel *weakItem = item;
+    void (^onTapCopy)(AWESettingItemModel *, UIViewController *) = [onTap copy];
+    item.cellTappedBlock = ^{
+        UIViewController *presenter = gSettingsPresenter;
+        if (onTapCopy && presenter) onTapCopy(weakItem, presenter);
+    };
+    return item;
+}
+
+void DKSettingsReloadCurrentPage(void) {
+    UIViewController *presenter = gSettingsPresenter;
+    if (presenter) [DKFindTableView(presenter.view) reloadData];
 }
 
 #pragma mark - 设置页构建

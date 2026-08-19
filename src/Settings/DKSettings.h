@@ -31,6 +31,14 @@ AWESettingItemModel *DKMakeChoice(NSString *key, NSString *title, NSArray<NSStri
 AWESettingItemModel *DKMakePercentSlider(NSString *key, NSString *title, NSString *message,
                                          NSInteger defaultPercent, void (^onChange)(NSInteger percent));
 
+/// 生成一个动作型设置项：点击时把该项与当前设置页交给 onTap，界面由功能自己弹。
+/// 状态不落在 NSUserDefaults 上（key 只作 identifier）的功能用它。
+AWESettingItemModel *DKMakeAction(NSString *key, NSString *title, NSString *detail,
+                                  void (^onTap)(AWESettingItemModel *item, UIViewController *presenter));
+
+/// 就地刷新当前设置页。改完某项的 detail 后调用，否则这一行要重进页面才更新。
+void DKSettingsReloadCurrentPage(void);
+
 #ifdef __cplusplus
 }
 #endif

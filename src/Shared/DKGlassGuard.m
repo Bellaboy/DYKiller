@@ -19,6 +19,7 @@ static NSSet<NSString *> *DKGlassGatedKeySet(void) {
                DKKeyInnerNotiCorner,
                DKKeyGlassTabBar,
                DKKeyGlassTabBarClear,
+               DKKeyPlusIcon,
                DKKeyAudioVizPosition,
                DKKeyAudioVizStyle,
                nil];
