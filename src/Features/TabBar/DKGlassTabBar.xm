@@ -271,17 +271,150 @@ static void DKGlassObserveStyle(UIView *host) API_AVAILABLE(ios(26.0)) {
     }];
 }
 
+#pragma mark - 内容取色
+
+// 内容的黑白极性跟【底色】走，不跟深浅色模式走：抖音首页在浅色模式下也是黑视频，消息页在
+// 深色模式下是黑底——模式说不清底色。选中/未选中的区别交给浓度（100% / 60%），这样两种极性
+// 下都保留切换指示，而不像出厂那样把「选中/未选中」当成「白/黑」两极用。
+//
+// 出厂两个色的来源（0.5.7-beta2 导出实证，见 docs/tab-bar-liquid-glass.md）：
+// · SelectedContentView 里那份 _UITabButton 的 tintColor 是白——UIKit 没写它，沿视图树继承
+//   到了 AWENormalModeTabBar.tintColor（抖音设的白），所以选中恒白、与深浅色无关。
+// · ContentView 里那份是纯黑——UIKit 按我们下发的 override trait 取。
+// 于是浅色模式下同一块玻璃上同时出现两种极性，深色模式下两者塌成同一个色。
+//
+// 选中透镜（_UITabSelectionView，CABackdropLayer）只取样背后内容（黑底页实测 #000000、
+// 白底页浅灰），不提供任何对比度保证，指望它兜底是错的。
+//
+// 两个色最终由标题图自己携带（见 DKGlassTitleImage）：beta3 实测 tint 那条路走不通。
+// 只管内容色。材质档（override 与 Clear 染色）仍归 DKGlassApplyStyle 按场景 trait 管。
+static UIImage *DKGlassTitleImage(NSString *title, UIColor *color);
+
+static UIUserInterfaceStyle gInkStyle = UIUserInterfaceStyleUnspecified;
+// 上一次分类过的宿主文字色，按指针比对做缓存——这是逐帧路径，指针没变就不必再解析一次。
+static UIColor *gInkHostColor = nil;
+static BOOL gInkHostIsLight = NO;
+// 判定用到的宿主色描述，只给探针看。
+static NSString *gInkSource = nil;
+// 事件计数，只给探针看。beta3 就是因为只有快照没有事件，才要交叉比对两行才看出样本是过期的。
+static NSUInteger gInkResolveCount = 0;    // 真正重新解析过宿主色的次数
+static NSUInteger gInkApplyCount = 0;      // 档位真的变了、重渲染过标题图的次数
+static NSUInteger gInkColorHits = 0;       // textColorChangedWithSelectedStatus: 命中次数
+static NSUInteger gInkStatusHits = 0;      // tabbarStatusDidChanged:animated: 命中次数
+// 已经写给拍摄图标的档位。按档位比对而不是按颜色比对：那是逐帧路径，UIColor 的相等性
+// 一旦对不上就会每帧重写 tintColor，白白触发 tintColorDidChange。
+static UIUserInterfaceStyle gPlusIconInkStyle = UIUserInterfaceStyleUnspecified;
+
+// 未选中的浓度。实测：50% 在亮底只有 3.94:1 不达 AA、55% 是 4.68:1 卡线，
+// 60% 两侧分别 6.69 / 5.59。不用系统 secondaryLabel——它浅色档是 #3C3C43 而非纯黑，
+// 压在白页上只有 3.4:1。保留 alpha、底色取纯黑白，与 DKGlassInkTextColor 同一口径。
+static const CGFloat kDKInkSecondaryAlpha = 0.60;
+
+static UIColor *DKGlassInkColor(BOOL selected) {
+    CGFloat white = (gInkStyle == UIUserInterfaceStyleDark) ? 1.0 : 0.0;
+    return [UIColor colorWithWhite:white alpha:(selected ? 1.0 : kDKInkSecondaryAlpha)];
+}
+
+// 按当前极性重渲染每个 item 的两张标题图。就地改 image / selectedImage，不重建 items——
+// 极性变化和切页是同一时刻，重建 items 会打断系统正在跑的透镜位移动画。
+static void DKGlassApplyItemImages(void) {
+    if (!gBar) return;
+    UIColor *selected = DKGlassInkColor(YES);
+    UIColor *normal = DKGlassInkColor(NO);
+    for (UITabBarItem *item in gBar.items) {
+        // 标题不另存一份：建 item 时就写进 accessibilityLabel 了，跟着 item 走不会失配。
+        NSString *title = item.accessibilityLabel;
+        if (title.length == 0) continue;
+        item.image = DKGlassTitleImage(title, normal);
+        item.selectedImage = DKGlassTitleImage(title, selected);
+    }
+}
+
+// 底色明暗只有抖音自己知道：它每页都重算自绘按钮的文字色（首页白、浅色消息 #161823、
+// 深色消息白），那就是「这一页底色是什么」的现成答案，而且是抖音自己保证读得清的答案。
+// 这条判据还能修一个 trait 修不了的偏差：抖音把 window 的 override 钉死为浅色、深色模式是
+// 自己换肤画的、不进 UIKit trait，跟场景 trait 等于跟系统，抖音单独锁深色时会取错。
+//
+// 只取【选中】那颗按钮：未选中那颗可能是中灰或半透明，按明度分类会判错。
+// 直接从抖音的按钮数组里找，不依赖 gItemButtons——那样取色就得排在 DKGlassSyncItems 之后，
+// 而标题图要按极性渲染，必须先定极性。拍摄按钮的 validIndex 同样是 0，按 type 排除掉。
+static UIColor *DKGlassHostTitleColor(NSArray *buttons, NSInteger selectedIndex) {
+    for (id button in buttons) {
+        UIView *view = [button isKindOfClass:UIView.class] ? button : nil;
+        if (!view || view.isHidden || !view.superview) continue;
+        if ([DKGlassValue(button, @"type") longLongValue] == kDKPlusButtonType) continue;
+        if ([DKGlassValue(button, @"validIndex") integerValue] != selectedIndex) continue;
+        id inner = DKGlassValue(button, @"innerView");
+        return DKGlassValue(DKGlassValue(inner, @"label"), @"textColor");
+    }
+    return nil;
+}
+
+static UIUserInterfaceStyle DKGlassInkStyleFor(NSArray *buttons, NSInteger selectedIndex,
+                                               UIUserInterfaceStyle fallback) {
+    UIColor *host = DKGlassHostTitleColor(buttons, selectedIndex);
+    if (!host) {
+        gInkSource = @"宿主文字色取不到，回落场景 trait";
+        return gInkStyle != UIUserInterfaceStyleUnspecified ? gInkStyle : fallback;
+    }
+    if (host == gInkHostColor) return gInkHostIsLight ? UIUserInterfaceStyleLight
+                                                      : UIUserInterfaceStyleDark;
+
+    // 宿主给的可能是动态色，按当前场景解析后才是真值。
+    UIColor *resolved = [host resolvedColorWithTraitCollection:
+        [UITraitCollection traitCollectionWithUserInterfaceStyle:fallback]];
+    // 切页过渡里抖音会把文字整体淡出，那一帧的色不能用来判极性，保持上一次的结论。
+    if (CGColorGetAlpha(resolved.CGColor) < 0.5) {
+        gInkSource = [NSString stringWithFormat:@"样本 alpha 过低（%@），保持上次结论", resolved];
+        return gInkStyle != UIUserInterfaceStyleUnspecified ? gInkStyle : fallback;
+    }
+
+    // 宿主用黑系文字 → 这一页底色偏亮 → 我们也用黑系。
+    gInkHostColor = host;
+    gInkHostIsLight = DKGlassColorIsInk(resolved);
+    gInkSource = [NSString stringWithFormat:@"宿主文字色 %@", resolved];
+    gInkResolveCount++;
+    return gInkHostIsLight ? UIUserInterfaceStyleLight : UIUserInterfaceStyleDark;
+}
+
+// 与 DKGlassApplyStyle 同样的纪律：档位没变就什么都不做。
+// 不写 tintColor / unselectedItemTintColor：0.5.7-beta4 导出实证前者对 AlwaysOriginal 的
+// 标题图无效（浅色模式首页那份里未选中副本的 tintColor 是 trait 推出的黑，字却按我们烤进
+// 图里的白 60% 渲染，实测 RGB 166 = 0.6×255 + 0.4×32），后者根本不被悬浮 provider 采纳。
+static void DKGlassApplyInk(UIUserInterfaceStyle style) {
+    // gBar 的判定放在记录档位之前：没底栏可写就不能把档位记下来，否则下次同档会被跳过。
+    if (style == UIUserInterfaceStyleUnspecified || !gBar || style == gInkStyle) return;
+    gInkStyle = style;
+    gInkApplyCount++;
+    DKGlassApplyItemImages();
+}
+
+NSString *DKGlassInkStatus(void) {
+    if (gInkStyle == UIUserInterfaceStyleUnspecified) return @"未判定（功能关闭或尚未布局）";
+    return [NSString stringWithFormat:
+            @"底色%@ · 选中 %@ · 未选中 %@\n"
+            @"                       依据：%@\n"
+            @"                       事件：写色 %lu · 状态变 %lu · 重新解析 %lu · 改档 %lu",
+            gInkStyle == UIUserInterfaceStyleDark ? @"偏暗（内容用白）" : @"偏亮（内容用黑）",
+            DKGlassInkColor(YES), DKGlassInkColor(NO), gInkSource ?: @"(无)",
+            (unsigned long)gInkColorHits, (unsigned long)gInkStatusHits,
+            (unsigned long)gInkResolveCount, (unsigned long)gInkApplyCount];
+}
+
 #pragma mark - 标题图
 
 // iOS 26 悬浮底栏按「图标在上、标签在下」排版，只给标题时图标槽空着、标题落到按钮底部；
 // titlePositionAdjustment 属于旧版层叠布局，悬浮 provider 完全忽略（实测给到 -168 仍纹丝
 // 不动）。故把标题渲染成模板图当图标用、标题置空，由系统把它当图标居中。
-// 模板图只取 alpha，着色仍归系统，选中态与深浅色都自动跟上。
+// 颜色直接烤进图里、走 AlwaysOriginal，不留给任何 tint API 决定：0.5.7-beta3 实测
+// `unselectedItemTintColor` 不被悬浮 provider 采纳（截图逐像素量到未选中字仍是纯白
+// L=0.965，而白 60% 压在 L=0.019 的胶囊上应为 L≈0.32），选中与未选中因此毫无区别。
+// 两张图字形与字号完全相同，只有颜色和浓度不同，所以尺寸一致、胶囊宽度不会跳。
 // 字重取 Semibold：玻璃胶囊上压着的内容要够重，太细在半透明底上会发糊。
-static UIImage *DKGlassTitleImage(NSString *title) {
+static UIImage *DKGlassTitleImage(NSString *title, UIColor *color) {
     NSDictionary *attributes = @{
         NSFontAttributeName: [UIFont systemFontOfSize:kDKTitleFontSize weight:UIFontWeightSemibold],
-        NSForegroundColorAttributeName: UIColor.blackColor
+        NSForegroundColorAttributeName: color
     };
     CGSize size = [title sizeWithAttributes:attributes];
     size.width = ceil(size.width);
@@ -293,7 +426,7 @@ static UIImage *DKGlassTitleImage(NSString *title) {
         imageWithActions:^(__unused UIGraphicsImageRendererContext *context) {
             [title drawAtPoint:CGPointZero withAttributes:attributes];
         }];
-    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
 }
 
 #pragma mark - 拍摄图标
@@ -356,7 +489,7 @@ static UIImage *DKGlassTrimTransparent(UIImage *image) {
 }
 
 // 图标同样走模板图：抖音会随页面在白/黑两版图标间切换，只取 alpha 则两版形状一致，
-// 着色交给圆键的 trait，浅色玻璃上不会出现看不见的白图标。
+// 着色跟内容极性走（见「内容取色」），黑视频上不会出现看不见的黑图标。
 CGFloat DKGlassPlusIconInset(void) {
     return DKPlusIconCustom() ? kDKPlusIconCustomInset : kDKPlusIconInset;
 }
@@ -369,7 +502,17 @@ static void DKGlassSyncPlusIcon(UIView *button) {
         if (custom == gPlusSourceIcon) return;
         gPlusSourceIcon = custom;
         gPlusIcon.image = custom;
+        // 自定义图标保持用户选的原色，一律不着色。档位复位是为了用户清掉它之后，
+        // 下一次布局能把模板图的着色补回来。
+        gPlusIconInkStyle = UIUserInterfaceStyleUnspecified;
         return;
+    }
+
+    // 着色写在这里而不是 DKGlassApplyInk：这个函数每次布局都跑，图源没变也会走到，
+    // 用户清掉自定义图标后不必等极性变化就能补上。
+    if (gPlusIconInkStyle != gInkStyle) {
+        gPlusIconInkStyle = gInkStyle;
+        gPlusIcon.tintColor = DKGlassInkColor(YES);
     }
 
     UIImage *source = DKGlassPlusSourceIcon(button);
@@ -504,8 +647,8 @@ static BOOL DKGlassSyncItems(UITabBarController *controller, NSArray *buttons) {
         NSMutableArray<UITabBarItem *> *items = [NSMutableArray arrayWithCapacity:titles.count];
         [titles enumerateObjectsUsingBlock:^(NSString *title, NSUInteger index, __unused BOOL *stop) {
             // 标题走 image 槽（见 DKGlassTitleImage），title 置空，否则系统还会再排一行标签。
-            UITabBarItem *item = [[UITabBarItem alloc] initWithTitle:nil
-                                                               image:DKGlassTitleImage(title)
+            // 图交给 DKGlassApplyItemImages 按极性统一渲染，选中与未选中各一张。
+            UITabBarItem *item = [[UITabBarItem alloc] initWithTitle:nil image:nil
                                                                  tag:(NSInteger)index];
             item.accessibilityLabel = title;   // 标题不再是文字，旁白与探针都靠它认人
             [items addObject:item];
@@ -513,6 +656,7 @@ static BOOL DKGlassSyncItems(UITabBarController *controller, NSArray *buttons) {
         gBar.items = items;
         gItemKinds = kinds;
         gSignature = [signature copy];
+        DKGlassApplyItemImages();
     }
 
     NSUInteger current = [gItemKinds indexOfObject:@((NSInteger)controller.selectedIndex)];
@@ -543,7 +687,11 @@ static void DKGlassScheduleMirror(void) {
         if (!gBar || !controller) return;
         // 内容没变时纯空转；变了才重建 items，并要求底栏重排一次几何——胶囊宽度归 UIKit 算，
         // 圆键位置得跟着它走。签名收敛后不再标脏，不会形成布局环。
-        if (DKGlassSyncItems(controller, DKGlassValue(bar, @"tabBarButtons"))) [bar setNeedsLayout];
+        // 取色排在同步之前：标题图要按极性渲染，极性得先定下来。
+        NSArray *buttons = DKGlassValue(bar, @"tabBarButtons");
+        DKGlassApplyInk(DKGlassInkStyleFor(buttons, (NSInteger)controller.selectedIndex,
+                                           gGlassStyle));
+        if (DKGlassSyncItems(controller, buttons)) [bar setNeedsLayout];
     });
 }
 
@@ -561,7 +709,6 @@ static UIVisualEffectView *DKGlassMakePlusKey(id target) API_AVAILABLE(ios(26.0)
 
     gPlusIcon = [[UIImageView alloc] init];
     gPlusIcon.contentMode = UIViewContentModeScaleAspectFit;
-    gPlusIcon.tintColor = UIColor.labelColor;
     [key.contentView addSubview:gPlusIcon];
 
     gPlusHit = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -674,6 +821,9 @@ static void DKGlassUpdate(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios(26.0
         gSignature = nil;
         // 重新开启时材质与 platter 玻璃都要能重新装上；探测结果不复位，那是设备能力，一次为准。
         gGlassStyle = UIUserInterfaceStyleUnspecified;
+        gInkStyle = UIUserInterfaceStyleUnspecified;
+        gInkHostColor = nil;
+        gPlusIconInkStyle = UIUserInterfaceStyleUnspecified;
         gPlatterGlassStyle = UIUserInterfaceStyleUnspecified;
         gPlatterGlassInstalled = nil;
         // 玻璃底栏是可视化的落位基准，它一撤可视化必须跟着撤，否则会留下一层孤儿视图。
@@ -706,6 +856,8 @@ static void DKGlassUpdate(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios(26.0
     DKGlassObserveStyle(douyinBar);
     // 监听之外再逐帧比对一次：冷启动首帧与刚挂上时都没有 trait 变化事件可等。
     DKGlassApplyStyle(douyinBar.window.windowScene.traitCollection.userInterfaceStyle);
+    // 取色排在最前：标题图按极性渲染，拍摄图标着色也要用这一步定下的极性。
+    DKGlassApplyInk(DKGlassInkStyleFor(buttons, (NSInteger)controller.selectedIndex, gGlassStyle));
     DKGlassSyncItems(controller, buttons);
     DKGlassLayoutGlass(douyinBar);
     DKGlassSetDouyinContentVisible(douyinBar, buttons, NO);
@@ -755,6 +907,22 @@ void DKGlassTabBarRefresh(void) {
 
 - (void)layoutSubviews {
     %orig;
+    DKGlassScheduleMirror();
+}
+
+// 抖音写文字色的两个入口（类信息实证；首页那颗的 AWENormalModeTabBarFeedView 继承本类、
+// 不重写这两个方法，所以一处覆盖全部四颗）。挂布局读到的必然是写入之前的旧值——写色本身
+// 不触发布局，beta3 首页因此一直停在上一页的样本上。%orig 之后排一次补读，合并调度保证
+// 一轮最多跑一趟。两处各自记数：若某一个长期为 0，说明它是多余的，可以删。
+- (void)textColorChangedWithSelectedStatus:(BOOL)selected {
+    %orig;
+    gInkColorHits++;
+    DKGlassScheduleMirror();
+}
+
+- (void)tabbarStatusDidChanged:(long long)status animated:(BOOL)animated {
+    %orig;
+    gInkStatusHits++;
     DKGlassScheduleMirror();
 }
 

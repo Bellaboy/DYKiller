@@ -127,6 +127,19 @@ static void DKProbeAppendWindowGestures(NSMutableString *out, UIWindow *window) 
     }
 }
 
+// 标题图自带颜色（AlwaysOriginal），选中与未选中各一张。回读每颗按钮实际显示的是哪一张，
+// 用来判定悬浮 provider 认不认 selectedImage——认，选中与未选中才有浓度差。
+static NSString *DKProbeTitleImageSource(UIView *imageView, UITabBar *bar) {
+    UIImage *shown = [imageView isKindOfClass:UIImageView.class]
+        ? ((UIImageView *)imageView).image : nil;
+    if (!shown) return @"(无)";
+    for (UITabBarItem *item in bar.items) {
+        if (shown == item.selectedImage) return @"选中图";
+        if (shown == item.image) return @"未选中图";
+    }
+    return @"其他";
+}
+
 // 玻璃质感与深色适配的判据：backgroundEffect 读到 nil 或 UIGlassEffect 才是出厂的液态玻璃；
 // 读到 UIBlurEffect 说明被降级成了老毛玻璃。trait 各级对照用于定位深色不跟随的源头。
 static void DKProbeAppendGlassBar(NSMutableString *out, UITabBarController *controller) {
@@ -152,8 +165,10 @@ static void DKProbeAppendGlassBar(NSMutableString *out, UITabBarController *cont
     [out appendFormat:@"  items=%lu  selectedItem=%@\n",
      (unsigned long)bar.items.count, bar.selectedItem.accessibilityLabel ?: @"(nil)"];
     for (UITabBarItem *item in bar.items) {
-        [out appendFormat:@"    %@  标题图=%@  badgeValue=%@\n", item.accessibilityLabel ?: @"(nil)",
+        [out appendFormat:@"    %@  未选中图=%@  选中图=%@  badgeValue=%@\n",
+         item.accessibilityLabel ?: @"(nil)",
          item.image ? NSStringFromCGSize(item.image.size) : @"(无)",
+         item.selectedImage ? NSStringFromCGSize(item.selectedImage.size) : @"(无)",
          item.badgeValue ? [NSString stringWithFormat:@"\"%@\"", item.badgeValue] : @"(nil)"];
     }
 
@@ -182,13 +197,23 @@ static void DKProbeAppendGlassBar(NSMutableString *out, UITabBarController *cont
     // 胶囊清透与否只看这一行：appearance.backgroundEffect 是旧 API，悬浮 provider 不读，
     // 真正渲染胶囊的是 platter 自己的 glassEffect。
     [out appendFormat:@"  platter 玻璃       = %@\n", DKGlassPlatterGlassStatus()];
+    // 内容取色的唯一读数：极性判定、写下去的两个色、判定依据。
+    [out appendFormat:@"  内容取色           = %@\n", DKGlassInkStatus()];
+    // 悬浮底栏把每个 tab 画两遍：SelectedContentView 那份是选中样子（只在透镜内可见），
+    // ContentView 那份是未选中样子。「显示的是」这一列是浓度差有没有生效的判据——
+    // 两份必须分别取到选中图与未选中图。不打 tintColor：标题图走 AlwaysOriginal，
+    // 那个值不参与绘制（未选中副本上它是 trait 推出来的，读了只会误导）。
     for (UIView *button in DKProbeFindSubviews(platter, @"_UITabButton")) {
         UIView *image = DKProbeFindSubview(button, @"ImageView");
         UIView *label = DKProbeFindSubview(button, @"Label");
-        [out appendFormat:@"    按钮 frame=%@  标题图 frame=%@  残留文字 frame=%@\n",
+        BOOL selectedCopy = [NSStringFromClass(button.superview.class)
+                             containsString:@"SelectedContentView"];
+        [out appendFormat:@"    %@ frame=%@  标题图 frame=%@  残留文字 frame=%@  显示的是=%@\n",
+         selectedCopy ? @"选中副本" : @"未选中副本",
          NSStringFromCGRect(button.frame),
          image ? NSStringFromCGRect(image.frame) : @"(无)",
-         label ? NSStringFromCGRect(label.frame) : @"(无)"];
+         label ? NSStringFromCGRect(label.frame) : @"(无)",
+         DKProbeTitleImageSource(image, bar)];
     }
 
     [out appendFormat:@"  抖音 selectedIndex = %lu\n", (unsigned long)controller.selectedIndex];
@@ -664,9 +689,12 @@ static void DKProbeAppendDouyinBar(NSMutableString *out, UITabBarController *con
     [out appendFormat:@"buttons.count        = %lu\n", (unsigned long)buttons.count];
     for (id button in buttons) {
         UIView *view = [button isKindOfClass:UIView.class] ? button : nil;
-        NSString *title = DKProbeValue(DKProbeValue(DKProbeValue(button, @"innerView"), @"label"), @"text");
-        [out appendFormat:@"  %@ 文字=%@ hidden=%@ type=%@ validIndex=%@\n",
+        id label = DKProbeValue(DKProbeValue(button, @"innerView"), @"label");
+        NSString *title = DKProbeValue(label, @"text");
+        // 文字色是内容取色的判据输入：抖音每页重算它，首页白、浅色列表页近黑。
+        [out appendFormat:@"  %@ 文字=%@ 文字色=%@ hidden=%@ type=%@ validIndex=%@\n",
          NSStringFromClass([button class]), title ?: view.accessibilityLabel ?: @"(nil)",
+         DKProbeColorDesc(DKProbeValue(label, @"textColor")),
          view.isHidden ? @"YES" : @"NO",
          DKProbeValue(button, @"type") ?: @"?", DKProbeValue(button, @"validIndex") ?: @"?"];
 
