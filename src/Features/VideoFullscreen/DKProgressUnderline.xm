@@ -10,6 +10,7 @@
 #import "DKVideoFeedTable.h"
 #import "DouyinHeaders.h"
 #import "DKUtils.h"
+#import "DKRuntimeDiagnostics.h"
 #import <objc/runtime.h>
 #import <math.h>
 
@@ -21,6 +22,7 @@ static char kDKUnderlineOpaqueKey;
 static char kDKProgressLiftTransformKey;
 
 static NSHashTable<UIView *> *gLiftedProgressViews;
+static BOOL DKPureModeActiveForView(UIView *view);
 
 // 忽略已有 transform，读取抖音实际排版出的 identity frame。
 // 这样重复 layout 时不会把我们自己的抬升再次算进判断。
@@ -77,6 +79,10 @@ static BOOL DKApplyProgressLift(UIView *view, CGFloat lift) {
     if (!CGAffineTransformEqualToTransform(view.transform, target)) {
         view.transform = target;
     }
+    DKRuntimeDiagnosticsObserveState(@"video.progress", @"lifted", @{
+        @"pure_mode": @(DKPureModeActiveForView(view)),
+        @"lift": @(round(lift * 2.0) / 2.0)
+    });
     return YES;
 }
 
@@ -88,6 +94,7 @@ static void DKRestoreProgressLift(UIView *view) {
     if (!CGAffineTransformEqualToTransform(view.transform, target)) {
         view.transform = target;
     }
+    DKRuntimeDiagnosticsRecordEvent(@"video.progress", @"restored", @{});
     objc_setAssociatedObject(view, &kDKProgressLiftTransformKey, nil,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
@@ -234,12 +241,20 @@ static void DKRestoreUnderline(UIView *view) {
 
 - (void)setAlpha:(CGFloat)alpha {
     UIView *slider = (UIView *)self;
-    %orig(DKPureModeActiveForView(slider) ? 1.0 : alpha);
+    BOOL active = DKPureModeActiveForView(slider);
+    if (active && alpha <= 0.01) {
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_slider_hidden_by_alpha", @{});
+    }
+    %orig(active ? 1.0 : alpha);
 }
 
 - (void)setHidden:(BOOL)hidden {
     UIView *slider = (UIView *)self;
-    %orig(DKPureModeActiveForView(slider) ? NO : hidden);
+    BOOL active = DKPureModeActiveForView(slider);
+    if (active && hidden) {
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_slider_hidden", @{});
+    }
+    %orig(active ? NO : hidden);
 }
 
 %end

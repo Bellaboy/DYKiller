@@ -14,6 +14,7 @@
 #import "DKAudioProbe.h"
 #import "DKAudioRuntime.h"
 #import "DKTabBarProbe.h"
+#import "DKRuntimeDiagnostics.h"
 
 @interface DKDebugOverlayView : UIView
 @end
@@ -32,9 +33,12 @@
 
 @interface DKDebugOverlayViewController : UIViewController
 @property (nonatomic, strong) UIButton *wrenchButton;
+@property (nonatomic, strong) UIButton *diagnosticsButton;
 @property (nonatomic, assign) BOOL didPlaceButton;
+@property (nonatomic, assign) BOOL didPlaceDiagnosticsButton;
 - (BOOL)capturesOverlayTouches;
 - (void)exportWholePage;
+- (void)exportRuntimeDiagnostics;
 - (void)showAudioStateMenu;
 - (void)startAudioExportWithDeclaredState:(NSString *)declaredState;
 @end
@@ -46,8 +50,13 @@
                                                ? (DKDebugOverlayViewController *)self.rootViewController
                                                : nil;
     if ([controller capturesOverlayTouches]) return [super pointInside:point withEvent:event];
-    CGPoint p = [controller.wrenchButton convertPoint:point fromView:self];
-    return [controller.wrenchButton pointInside:p withEvent:event];
+    for (UIButton *button in @[controller.wrenchButton ?: [UIButton new],
+                               controller.diagnosticsButton ?: [UIButton new]]) {
+        if (button.hidden || button.alpha <= 0.01) continue;
+        CGPoint p = [button convertPoint:point fromView:self];
+        if ([button pointInside:p withEvent:event]) return YES;
+    }
+    return NO;
 }
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
@@ -263,12 +272,38 @@ static void DKEnsureDebugWindow(void) {
     [self.wrenchButton addTarget:self action:@selector(showDebugMenu) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.wrenchButton];
 
+    self.diagnosticsButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    self.diagnosticsButton.frame = CGRectMake(0, 0, 48, 48);
+    self.diagnosticsButton.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.82];
+    self.diagnosticsButton.tintColor = UIColor.whiteColor;
+    self.diagnosticsButton.layer.cornerRadius = 24;
+    self.diagnosticsButton.layer.shadowColor = UIColor.blackColor.CGColor;
+    self.diagnosticsButton.layer.shadowOpacity = 0.24;
+    self.diagnosticsButton.layer.shadowRadius = 8;
+    self.diagnosticsButton.layer.shadowOffset = CGSizeMake(0, 2);
+    self.diagnosticsButton.accessibilityLabel = @"导出 DYKiller 诊断日志";
+    UIImage *diagnosticsImage = nil;
+    if ([UIImage respondsToSelector:@selector(systemImageNamed:)]) {
+        diagnosticsImage = [UIImage systemImageNamed:@"square.and.arrow.up"];
+    }
+    if (diagnosticsImage) {
+        [self.diagnosticsButton setImage:diagnosticsImage forState:UIControlStateNormal];
+    } else {
+        [self.diagnosticsButton setTitle:@"↥" forState:UIControlStateNormal];
+        self.diagnosticsButton.titleLabel.font = [UIFont boldSystemFontOfSize:22];
+    }
+    [self.diagnosticsButton addTarget:self action:@selector(exportRuntimeDiagnostics)
+                     forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.diagnosticsButton];
+
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleWrenchPan:)];
     [self.wrenchButton addGestureRecognizer:pan];
 }
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    self.wrenchButton.hidden = !DKPrefBool(DKKeyDebugInspectorEnabled);
+    self.diagnosticsButton.hidden = !DKRuntimeDiagnosticsFloatingButtonEnabled();
     if (!self.didPlaceButton) {
         UIEdgeInsets insets = self.view.safeAreaInsets;
         CGFloat x = self.view.bounds.size.width - insets.right - 12.0 - 24.0;
@@ -276,7 +311,15 @@ static void DKEnsureDebugWindow(void) {
         self.wrenchButton.center = CGPointMake(x, y);
         self.didPlaceButton = YES;
     }
+    if (!self.didPlaceDiagnosticsButton) {
+        UIEdgeInsets insets = self.view.safeAreaInsets;
+        CGFloat x = self.view.bounds.size.width - insets.right - 12.0 - 24.0;
+        CGFloat y = insets.top + 12.0 + 24.0 + 60.0;
+        self.diagnosticsButton.center = CGPointMake(x, y);
+        self.didPlaceDiagnosticsButton = YES;
+    }
     [self clampWrenchButton];
+    [self clampDiagnosticsButton];
 }
 
 - (void)clampWrenchButton {
@@ -291,6 +334,20 @@ static void DKEnsureDebugWindow(void) {
     c.x = MIN(MAX(c.x, minX), maxX);
     c.y = MIN(MAX(c.y, minY), maxY);
     self.wrenchButton.center = c;
+}
+
+- (void)clampDiagnosticsButton {
+    UIEdgeInsets insets = self.view.safeAreaInsets;
+    CGFloat halfW = self.diagnosticsButton.bounds.size.width / 2.0;
+    CGFloat halfH = self.diagnosticsButton.bounds.size.height / 2.0;
+    CGFloat minX = insets.left + halfW + 6.0;
+    CGFloat maxX = self.view.bounds.size.width - insets.right - halfW - 6.0;
+    CGFloat minY = insets.top + halfH + 6.0;
+    CGFloat maxY = self.view.bounds.size.height - insets.bottom - halfH - 6.0;
+    CGPoint c = self.diagnosticsButton.center;
+    c.x = MIN(MAX(c.x, minX), maxX);
+    c.y = MIN(MAX(c.y, minY), maxY);
+    self.diagnosticsButton.center = c;
 }
 
 - (void)handleWrenchPan:(UIPanGestureRecognizer *)pan {
@@ -337,6 +394,14 @@ static void DKEnsureDebugWindow(void) {
     context.presenter = self;
     context.sourceView = self.wrenchButton;
     DKStartExport(context, DKDebugExportModePage);
+}
+
+- (void)exportRuntimeDiagnostics {
+    if (!DKRuntimeDiagnosticsEnabled()) {
+        DKPresentError(self, @"智能运行诊断当前未开启。请先在 DYKiller → 调试 中打开，再重现问题。");
+        return;
+    }
+    DKRuntimeDiagnosticsPresentExport(self);
 }
 
 - (void)showAudioStateMenu {
@@ -460,8 +525,9 @@ static void DKEnsureDebugWindow(void) {
 
 void DKDebugInspectorRefreshOverlay(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        BOOL enabled = DKPrefBool(DKKeyDebugInspectorEnabled);
-        if (!enabled) {
+        BOOL debugEnabled = DKPrefBool(DKKeyDebugInspectorEnabled);
+        BOOL diagnosticsEnabled = DKRuntimeDiagnosticsFloatingButtonEnabled();
+        if (!debugEnabled && !diagnosticsEnabled) {
             if (DKDebugWindow) {
                 DKDebugWindow.hidden = YES;
                 [DKDebugTargetWindow() makeKeyWindow];

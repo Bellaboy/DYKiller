@@ -25,6 +25,7 @@
 #import "DKVideoFeedTable.h"
 #import "DKVideoFullscreen.h"
 #import "DouyinHeaders.h"
+#import "DKRuntimeDiagnostics.h"
 #import <objc/runtime.h>
 #import <math.h>
 
@@ -99,7 +100,10 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
 
     // 抖音在表进入窗口前会先写一次半成品高度。此时撑高会让视频链条先进入错误几何，
     // 入窗后再回落，形成清屏切换时可见的短暂留白。
-    if (!table.window) return CGRectNull;
+    if (!table.window) {
+        DKRuntimeDiagnosticsObserveState(@"video.feed_table", @"pre_window_frame_passed", @{});
+        return CGRectNull;
+    }
 
     CGFloat target = table.superview ? CGRectGetHeight(table.superview.bounds) : 0.0;
     CGFloat current = CGRectGetHeight(frame);
@@ -116,6 +120,7 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [gStretchedTables addObject:table];
     }
+    DKRuntimeDiagnosticsObserveState(@"video.feed_table", @"stretched_after_window", @{});
     frame.size.height = target;
     return frame;
 }

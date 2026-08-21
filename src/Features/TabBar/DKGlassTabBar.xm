@@ -22,6 +22,7 @@
 #import "DKKeys.h"
 #import "DKSettings.h"
 #import "DKUtils.h"
+#import "DKRuntimeDiagnostics.h"
 
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
@@ -799,11 +800,13 @@ static void DKGlassFadeInWhenHostAppears(AWENormalModeTabBar *douyinBar)
     API_AVAILABLE(ios(26.0)) {
     if (!gBar || !gPlusKey || !DKGlassHostIsVisible(douyinBar)) {
         gGlassHostWasVisible = NO;
+        if (gBar) DKRuntimeDiagnosticsObserveState(@"tabbar.glass", @"host_not_visible", @{});
         return;
     }
 
     if (gGlassHostWasVisible) return;
     gGlassHostWasVisible = YES;
+    DKRuntimeDiagnosticsRecordEvent(@"tabbar.glass", @"fade_in_started", @{});
 
     [UIView performWithoutAnimation:^{
         gBar.alpha = 0.0;

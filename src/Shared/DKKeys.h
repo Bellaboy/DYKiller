@@ -13,6 +13,10 @@
 #error DK_VERSION must be injected by Makefile from control Version.
 #endif
 
+#ifndef DK_BUILD_ID
+#define DK_BUILD_ID @"unknown"
+#endif
+
 #pragma mark - 功能组：视频全屏
 
 // 首页、朋友页、好友聊天页、搜索页、其他用户作品页统一由这一个开关控制。
@@ -69,5 +73,9 @@ static NSString *const DKKeyProfileHideUGCGuide = @"DYKillerHideProfileUGCGuide"
 #pragma mark - 功能组：调试工具
 
 static NSString *const DKKeyDebugInspectorEnabled = @"DYKillerDebugInspectorEnabled";
+// 自动状态与响应诊断；默认关闭，不记录账号、内容或网络字段。
+static NSString *const DKKeyRuntimeDiagnosticsEnabled = @"DYKillerRuntimeDiagnosticsEnabled";
+// 诊断导出悬浮按钮；未写入时按默认关闭处理。
+static NSString *const DKKeyRuntimeDiagnosticsFloatingButton = @"DYKillerRuntimeDiagnosticsFloatingButton";
 
 #endif /* DKKeys_h */

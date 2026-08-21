@@ -304,6 +304,14 @@ static void DKShowSettings(UIViewController *rootVC) {
         [arr addObject:item];
     }
 
+    // 调试/诊断项集中放在插件设置列表末尾，避免运行功能与诊断开关交错。
+    NSString *diagnosticsHeader = @"调试";
+    NSUInteger diagnosticsIndex = [headerOrder indexOfObject:diagnosticsHeader];
+    if (diagnosticsIndex != NSNotFound && diagnosticsIndex + 1 < headerOrder.count) {
+        [headerOrder removeObjectAtIndex:diagnosticsIndex];
+        [headerOrder addObject:diagnosticsHeader];
+    }
+
     NSMutableArray *sections = [NSMutableArray array];
     for (NSString *header in headerOrder) {
         AWESettingSectionModel *section = [[%c(AWESettingSectionModel) alloc] init];

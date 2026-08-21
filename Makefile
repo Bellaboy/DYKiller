@@ -8,6 +8,7 @@ ARCHS = arm64 arm64e
 INSTALL_TARGET_PROCESSES = Aweme
 
 DK_VERSION := $(shell awk -F': *' '$$1 == "Version" { print $$2; exit }' control)
+DK_BUILD_ID := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet -- . 2>/dev/null || echo -dirty)
 DYKILLER_PACKAGE_SCHEME ?= $(if $(THEOS_PACKAGE_SCHEME),$(THEOS_PACKAGE_SCHEME),rootful)
 
 ifeq ($(strip $(DK_VERSION)),)
@@ -32,7 +33,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = DYKiller
 DYKiller_FILES = $(shell find src -type f \( -name '*.m' -o -name '*.mm' -o -name '*.x' -o -name '*.xm' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' \) | sort)
 DYKiller_INCLUDE_DIRS = $(shell find src -type d | sort)
-DYKiller_CFLAGS = -fobjc-arc -w -fmodules-cache-path=$(CURDIR)/debug/details/module-cache $(addprefix -I,$(DYKiller_INCLUDE_DIRS)) -DDK_VERSION=@\"$(DK_VERSION)\"
+DYKiller_CFLAGS = -fobjc-arc -w -fmodules-cache-path=$(CURDIR)/debug/details/module-cache $(addprefix -I,$(DYKiller_INCLUDE_DIRS)) -DDK_VERSION=@\"$(DK_VERSION)\" -DDK_BUILD_ID=@\"$(DK_BUILD_ID)\"
 DYKiller_FRAMEWORKS = UIKit Foundation QuartzCore CoreGraphics PhotosUI AudioToolbox AVFAudio AVFoundation CoreMedia MediaToolbox Accelerate
 DYKiller_LDFLAGS += -lz
 DYKiller_LOGOS_DEFAULT_GENERATOR = internal
