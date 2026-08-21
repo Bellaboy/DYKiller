@@ -65,6 +65,23 @@ jobs:
       - name: Verify DYKiller release assets
         run: bash .github/scripts/verify-assets.sh
 
+      - name: Stamp assets with Action run number
+        env:
+          ACTION_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          for file in packages/*.deb packages/*.dylib; do
+            [ -f "$file" ] || continue
+            case "$file" in
+              *.deb) output="${file%.deb}-action${ACTION_NUMBER}.deb" ;;
+              *.dylib) output="${file%.dylib}-action${ACTION_NUMBER}.dylib" ;;
+              *) continue ;;
+            esac
+            mv "$file" "$output"
+          done
+
       - name: Upload DYKiller artifacts
         uses: actions/upload-artifact@v4
         with:

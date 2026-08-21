@@ -113,6 +113,22 @@ jobs:
             fi
           done
 
+          shopt -s nullglob
+          for file in packages/*.deb packages/*.dylib; do
+            [ -f "$file" ] || continue
+            base=$(basename "$file")
+            normalized=$(printf '%s' "$base" | sed -E 's/-action[0-9]+(\.(deb|dylib))$/\1/')
+            if [ "$base" = "$normalized" ]; then
+              continue
+            fi
+            target="packages/$normalized"
+            if [ -e "$target" ]; then
+              echo "Refusing to overwrite existing release asset: $target" >&2
+              exit 1
+            fi
+            mv "$file" "$target"
+          done
+
       - name: Resolve release metadata
         id: release
         env:
