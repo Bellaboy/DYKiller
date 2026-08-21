@@ -135,43 +135,27 @@ static BOOL DKPureModeActiveForView(UIView *view) {
     return controller && controller.viewIfLoaded.window && !controller.isEnteringPureMode;
 }
 
-static CGFloat DKPureModeControlTop(UIView *root) {
-    CGFloat top = CGFLOAT_MAX;
-    NSMutableArray<UIView *> *pending = [NSMutableArray arrayWithObject:root];
-    while (pending.count > 0) {
-        UIView *view = pending.lastObject;
-        [pending removeLastObject];
-
-        NSString *name = NSStringFromClass(view.class);
-        if ([name hasPrefix:@"AFDRoundRectangleBox"]
-            && !view.hidden && view.alpha > 0.01
-            && CGRectGetWidth(view.bounds) >= 40.0
-            && CGRectGetHeight(view.bounds) >= 30.0
-            && CGRectGetHeight(view.bounds) <= 80.0) {
-            CGRect frame = [view.superview convertRect:view.frame toView:root];
-            if (CGRectGetMaxY(frame) > CGRectGetHeight(root.bounds) * 0.55) {
-                top = MIN(top, CGRectGetMinY(frame));
-            }
-        }
-        [pending addObjectsFromArray:view.subviews];
-    }
-
-    if (top != CGFLOAT_MAX) return top;
-    return CGRectGetHeight(root.bounds) - root.safeAreaInsets.bottom - 56.0;
-}
-
-// 清屏时仍只调整官方进度条容器；不创建覆盖层，也不并行安装第二套容器变换。
+// 清屏时仍只调整官方进度条容器；不扫描不稳定的控件树，也不并行安装第二套容器变换。
 static CGFloat DKPureModeProgressLift(UIView *progress) {
     if (!progress || !DKVideoFullscreenOn() || !DKPureModeActiveForView(progress)) return 0.0;
 
     AFDPureModePageContainerViewController *controller = DKPureModeControllerForView(progress);
     UIView *root = controller.viewIfLoaded;
     UIView *parent = progress.superview;
-    if (!root || !parent) return 0.0;
+    if (!root || !parent || ![progress isDescendantOfView:root]) {
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_progress_outside_controller_tree", @{});
+        return 0.0;
+    }
 
     CGRect identity = DKProgressIdentityFrame(progress);
     CGRect inRoot = [parent convertRect:identity toView:root];
-    CGFloat targetMaxY = DKPureModeControlTop(root) - 12.0;
+    if (CGRectGetMinY(inRoot) < -CGRectGetHeight(root.bounds)
+        || CGRectGetMaxY(inRoot) > CGRectGetHeight(root.bounds) * 1.5) {
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_progress_invalid_geometry", @{});
+        return 0.0;
+    }
+
+    CGFloat targetMaxY = CGRectGetHeight(root.bounds) - root.safeAreaInsets.bottom - 84.0;
     CGFloat lift = CGRectGetMaxY(inRoot) - targetMaxY;
     return lift > kDKUnderlineTolerance ? lift : 0.0;
 }

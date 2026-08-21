@@ -1,4 +1,5 @@
 name: build DYKiller packages
+run-name: DYKiller build · ${{ inputs.change_summary || 'manual build' }}
 
 on:
   push:
@@ -11,6 +12,12 @@ on:
       - 'DYKiller.plist'
       - '.github/**'
   workflow_dispatch:
+    inputs:
+      change_summary:
+        description: '本轮修改摘要（显示在 Action 事件标题）'
+        required: true
+        default: '未填写修改摘要'
+        type: string
 
 permissions:
   actions: read

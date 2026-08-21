@@ -21,6 +21,7 @@
 #import "DKKeys.h"
 #import "DKSettings.h"
 #import "DKUtils.h"
+#import "DKRuntimeDiagnostics.h"
 #import <math.h>
 
 // 高/宽达到此阈值才算「比例达标」，可以拉满整屏；低比例竖屏与横屏保持容器自然尺寸。
@@ -99,12 +100,9 @@ CGRect DKVideoContainerTargetFrame(UIView *view) {
 
     // 作用域只到主窗口：浮层窗口（画中画、横屏播放器）自带一整套 Merge / PlayVideo 层级，
     // 与 feed 里那套长得一样，钉成满幅会把小窗撑成盖住整页的全屏播放器。
-    // 取不到 window（布局早期还没入树）时按在作用域内处理，与其余判据一致。
-    //
-    // 这条守卫**挡不住入窗前的那一次写入**：抖音在把播放器加进 PiP 窗口之前就写好 frame，
-    // 那一刻 window 为 nil，写完之后也不会再写第二次（beta13 实测两份导出一对一错）。
-    // 评论面板那条画中画因此改为直接关掉功能本身，见 Comment/DKCommentFullBackdrop.xm。
+    // 入窗前的 frame 是布局半成品，不能在这里改写；入窗后的控制器布局钩子会补一次。
     UIWindow *window = view.window;
+    if (!window) return CGRectNull;
     if (window && window.windowLevel != UIWindowLevelNormal) return CGRectNull;
 
     UIView *parent = view.superview;
@@ -118,6 +116,20 @@ CGRect DKVideoContainerTargetFrame(UIView *view) {
         if (full > height) height = full;
     }
     return CGRectMake(0.0, 0.0, width, height);
+}
+
+static void DKVideoContainerEnsureAttachedFrame(AWEDPlayerViewController_Merge *merge) {
+    UIView *view = merge.viewIfLoaded;
+    if (!view || !view.window) {
+        if (view) DKRuntimeDiagnosticsObserveState(@"video.container", @"pre_window_frame_passed", @{});
+        return;
+    }
+
+    CGRect target = DKVideoContainerTargetFrame(view);
+    if (CGRectIsNull(target) || DKRectsClose(view.frame, target)) return;
+
+    DKRuntimeDiagnosticsObserveState(@"video.container", @"attached_layout_reflow", @{});
+    view.frame = target;
 }
 
 BOOL DKRectsClose(CGRect lhs, CGRect rhs) {
@@ -169,6 +181,15 @@ static CGRect DKAdjustFrame(UIView *view, CGRect frame) {
         return;
     }
     %orig(adjusted);
+}
+
+%end
+
+%hook AWEDPlayerViewController_Merge
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    DKVideoContainerEnsureAttachedFrame(self);
 }
 
 %end
