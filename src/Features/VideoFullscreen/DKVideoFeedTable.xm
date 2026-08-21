@@ -98,11 +98,14 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
         return CGRectNull;
     }
 
-    // 抖音在表进入窗口前会先写一次半成品高度。此时撑高会让视频链条先进入错误几何，
-    // 入窗后再回落，形成清屏切换时可见的短暂留白。
-    if (!table.window) {
+    // 抖音在表和父容器都未进入窗口前会先写一次半成品高度。父容器已经入窗时，
+    // 这张表只是尚未收到 didMoveToWindow；此时直接使用最终高度，避免首帧先显示 799
+    // 再在布局后跳到 874。
+    BOOL windowAttached = table.window != nil || table.superview.window != nil;
+    if (!windowAttached) {
         DKRuntimeDiagnosticsObserveState(@"video.feed_table", @"pre_window_frame_passed", @{
             @"window_attached": @NO,
+            @"parent_window_attached": @(table.superview.window != nil),
             @"current_height": @(round(CGRectGetHeight(frame) * 2.0) / 2.0),
             @"target_height": @(round(CGRectGetHeight(table.superview.bounds) * 2.0) / 2.0),
         });
@@ -110,8 +113,9 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
     }
 
     CGFloat target = table.superview ? CGRectGetHeight(table.superview.bounds) : 0.0;
+    UIView *viewportView = table.window ? table : table.superview;
     CGFloat viewportHeight = DKVideoIsMainFeedView(table)
-        ? DKVideoViewportHeightForView(table)
+        ? DKVideoViewportHeightForView(viewportView)
         : 0.0;
     if (viewportHeight > target) target = viewportHeight;
     CGFloat current = CGRectGetHeight(frame);
@@ -130,6 +134,7 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
     }
     DKRuntimeDiagnosticsObserveState(@"video.feed_table", @"stretched_after_window", @{
         @"window_attached": @YES,
+        @"parent_window_attached": @(table.superview.window != nil),
         @"main_feed": @(DKVideoIsMainFeedView(table)),
         @"current_height": @(round(current * 2.0) / 2.0),
         @"target_height": @(round(target * 2.0) / 2.0),
@@ -173,6 +178,11 @@ static void DKSyncFeedTableAfterLayout(UITableView *table) {
     DKSyncFeedTableAfterLayout(self);
 }
 
+- (void)didMoveToWindow {
+    %orig;
+    DKSyncFeedTableAfterLayout(self);
+}
+
 %end
 
 %hook AWEFeedTableView
@@ -187,6 +197,11 @@ static void DKSyncFeedTableAfterLayout(UITableView *table) {
 }
 
 - (void)layoutSubviews {
+    %orig;
+    DKSyncFeedTableAfterLayout(self);
+}
+
+- (void)didMoveToWindow {
     %orig;
     DKSyncFeedTableAfterLayout(self);
 }

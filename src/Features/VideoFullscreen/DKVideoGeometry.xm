@@ -65,11 +65,35 @@ static Class DKPlayInteractionClass(void) {
 BOOL DKVideoIsMainFeedView(UIView *view) {
     if (!view) return NO;
 
-    UIView *table = [view isKindOfClass:UITableView.class]
-        ? view
-        : DKFeedTableForView(view);
     Class feedClass = NSClassFromString(@"AWEFeedTableView");
-    return table && feedClass && [table isKindOfClass:feedClass];
+    if (!feedClass) return NO;
+
+    // 主 Feed 的播放器有两种宿主：普通视频直接挂在 feed table 下，图集的
+    // RichContent 控制器则可能隔着超过原先 8 层的容器。只认具体的
+    // AWEFeedTableView，不把详情/搜索共用的基类误判成主 Feed。
+    for (UIView *cursor = view; cursor; cursor = cursor.superview) {
+        if ([cursor isKindOfClass:feedClass]) return YES;
+    }
+
+    // 图集的播放器 view 可能只在 responder/controller 链上连回主 Feed。
+    for (UIResponder *responder = view.nextResponder;
+         responder;
+         responder = responder.nextResponder) {
+        if (![responder isKindOfClass:UIViewController.class]) continue;
+
+        UIViewController *controller = (UIViewController *)responder;
+        for (UIViewController *cursor = controller;
+             cursor;
+             cursor = cursor.parentViewController) {
+            UIView *controllerView = cursor.viewIfLoaded;
+            for (UIView *ancestor = controllerView;
+                 ancestor;
+                 ancestor = ancestor.superview) {
+                if ([ancestor isKindOfClass:feedClass]) return YES;
+            }
+        }
+    }
+    return NO;
 }
 
 CGFloat DKVideoViewportHeightForView(UIView *view) {

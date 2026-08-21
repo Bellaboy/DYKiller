@@ -137,8 +137,37 @@ static BOOL DKPureModeActiveForView(UIView *view) {
     return controller && controller.viewIfLoaded.window && !controller.isEnteringPureMode;
 }
 
+static NSString *DKProgressOwnerChain(UIView *progress) {
+    NSMutableArray<NSString *> *classes = [NSMutableArray array];
+    for (UIView *cursor = progress; cursor && classes.count < 8; cursor = cursor.superview) {
+        [classes addObject:NSStringFromClass(cursor.class) ?: @"?"];
+    }
+    return [classes componentsJoinedByString:@">"];
+}
+
+static NSString *DKProgressSubviewSummary(UIView *progress) {
+    NSMutableArray<NSString *> *items = [NSMutableArray array];
+    for (UIView *subview in progress.subviews) {
+        if (items.count >= 8) break;
+        [items addObject:[NSString stringWithFormat:@"%@:%@:%@:%@",
+                          NSStringFromClass(subview.class) ?: @"?",
+                          NSStringFromCGRect(subview.frame),
+                          subview.hidden ? @"H" : @"V",
+                          subview.alpha <= 0.01 ? @"0" : @"1"]];
+    }
+    return [items componentsJoinedByString:@";"];
+}
+
 static NSDictionary *DKProgressGeometryFields(UIView *progress, CGFloat lift, BOOL pureMode) {
     NSMutableDictionary *fields = [@{
+        @"instance_id": [NSString stringWithFormat:@"%p", progress],
+        @"progress_class": NSStringFromClass(progress.class) ?: @"?",
+        @"parent_class": progress.superview ? NSStringFromClass(progress.superview.class) : @"(nil)",
+        @"owner_chain": DKProgressOwnerChain(progress),
+        @"subviews": DKProgressSubviewSummary(progress),
+        @"window_attached": @(progress.window != nil),
+        @"controller_found": @(DKPureModeControllerForView(progress) != nil),
+        @"main_feed": @(DKVideoIsMainFeedView(progress)),
         @"pure_mode": @(pureMode),
         @"lift": @(round(lift * 2.0) / 2.0),
         @"bounds_width": @(round(CGRectGetWidth(progress.bounds) * 2.0) / 2.0),
@@ -154,6 +183,11 @@ static NSDictionary *DKProgressGeometryFields(UIView *progress, CGFloat lift, BO
     } mutableCopy];
 
     AFDPureModePageContainerViewController *controller = DKPureModeControllerForView(progress);
+    UIView *table = DKFeedTableForView(progress);
+    NSNumber *original = DKVideoFeedTableOriginalHeight(table);
+    fields[@"table_original_height"] = original
+        ? @(round(original.doubleValue * 2.0) / 2.0)
+        : @0.0;
     UIView *root = controller.viewIfLoaded;
     UIView *parent = progress.superview;
     if (!root || !parent || ![progress isDescendantOfView:root]) return fields;
@@ -210,8 +244,20 @@ static CGFloat DKPureModeProgressLift(UIView *progress) {
 static void DKUpdateProgressLayout(UIView *progress) {
     AFDPureModePageContainerViewController *pureMode = DKPureModeControllerForView(progress);
     BOOL pureActive = pureMode && DKPureModeActiveForView(progress);
-    CGFloat lift = pureMode ? DKPureModeProgressLift(progress)
-                            : DKProgressFullscreenLift(progress);
+
+    // isEnteringPureMode 只表示转场尚未稳定。此时不要把已经应用的位移恢复为 0，
+    // 否则进入清屏会先回到底部，根布局完成后又跳回目标位置。
+    if (pureMode && !pureActive) {
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_transition_preserved", @{
+            @"instance_id": [NSString stringWithFormat:@"%p", progress],
+            @"hidden": @(progress.hidden),
+            @"transform_ty": @(round(progress.transform.ty * 2.0) / 2.0),
+        });
+        return;
+    }
+
+    CGFloat lift = pureActive ? DKPureModeProgressLift(progress)
+                              : DKProgressFullscreenLift(progress);
 
     DKRuntimeDiagnosticsObserveState(@"video.progress", @"layout_snapshot",
                                      DKProgressGeometryFields(progress, lift, pureActive));
@@ -283,6 +329,33 @@ static void DKRestoreUnderline(UIView *view) {
             DKClearUnderline(view);
         }
     }
+}
+
+%end
+
+#pragma mark - 清屏根布局同步
+
+// 某些视频/图集的官方进度条在清屏切换时不会再次触发自己的 layoutSubviews，
+// 但它们仍然会在 AFDPureModePageContainerViewController 根布局中完成最终位置。
+// 这里统一扫当前清屏根下的官方容器，只重复使用 DKUpdateProgressLayout，不创建第二套控件。
+static void DKSyncPureModeProgressDescendants(UIView *root) {
+    if (!root) return;
+
+    Class progressClass = NSClassFromString(@"AWEDPlayerProgressContainerView");
+    if (progressClass && [root isKindOfClass:progressClass]) {
+        DKUpdateProgressLayout(root);
+    }
+
+    for (UIView *subview in root.subviews) {
+        DKSyncPureModeProgressDescendants(subview);
+    }
+}
+
+%hook AFDPureModePageContainerViewController
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    DKSyncPureModeProgressDescendants(self.viewIfLoaded);
 }
 
 %end
