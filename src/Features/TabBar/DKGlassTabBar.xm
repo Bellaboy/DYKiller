@@ -54,6 +54,8 @@ static const CGFloat kDKPlatterFallbackInset = 21.0;
 
 static UITabBar *gBar = nil;
 static id gProxy = nil;
+// 原生底栏从隐藏/透明恢复时，玻璃子视图只淡入一次；不改写父容器的显隐状态。
+static BOOL gGlassHostWasVisible = NO;
 // 每个 item 对应的 tab 序号（validIndex）。与 items 同序等长。
 static NSArray<NSNumber *> *gItemKinds = nil;
 // 每个 item 对应的抖音按钮，转发点击与读取角标都用它。与 items 同序等长。
@@ -789,6 +791,34 @@ static void DKGlassSetDouyinContentVisible(AWENormalModeTabBar *douyinBar, NSArr
     }
 }
 
+static BOOL DKGlassHostIsVisible(AWENormalModeTabBar *douyinBar) {
+    return douyinBar.window && !douyinBar.hidden && douyinBar.alpha > 0.01;
+}
+
+static void DKGlassFadeInWhenHostAppears(AWENormalModeTabBar *douyinBar)
+    API_AVAILABLE(ios(26.0)) {
+    if (!gBar || !gPlusKey || !DKGlassHostIsVisible(douyinBar)) {
+        gGlassHostWasVisible = NO;
+        return;
+    }
+
+    if (gGlassHostWasVisible) return;
+    gGlassHostWasVisible = YES;
+
+    [UIView performWithoutAnimation:^{
+        gBar.alpha = 0.0;
+        gPlusKey.alpha = 0.0;
+    }];
+    [UIView animateWithDuration:0.18
+                          delay:0.0
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                                 | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        gBar.alpha = 1.0;
+        gPlusKey.alpha = 1.0;
+    } completion:nil];
+}
+
 #pragma mark - 挂载与拆除
 
 // 整个功能只在 iOS 26 及以上成立——低版本没有 UIGlassEffect，装上去只是一条没有玻璃的
@@ -797,6 +827,7 @@ static void DKGlassUpdate(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios(26.0
     // 抖音换过底栏实例时，先把旧那条的内容还原——玻璃底栏只会跟着新实例走，
     // 旧实例的按钮若停在 opacity=0，它再次出现时就是一条空底栏。
     AWENormalModeTabBar *previousBar = gDouyinBar;
+    if (previousBar != douyinBar) gGlassHostWasVisible = NO;
     if (previousBar && previousBar != douyinBar && gBar) {
         DKGlassSetDouyinContentVisible(
             previousBar, DKGlassValue(previousBar, @"tabBarButtons"), YES);
@@ -805,6 +836,7 @@ static void DKGlassUpdate(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios(26.0
 
     NSArray *buttons = DKGlassValue(douyinBar, @"tabBarButtons");
     if (!DKGlassTabBarEnabled()) {
+        gGlassHostWasVisible = NO;
         if (!gBar) return;
         DKGlassSetDouyinContentVisible(douyinBar, buttons, YES);
         [gBar removeFromSuperview];
@@ -844,6 +876,9 @@ static void DKGlassUpdate(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios(26.0
         gPlusKey = DKGlassMakePlusKey(gProxy);
     }
 
+    BOOL wasMounted = (gBar.superview == douyinBar && gPlusKey.superview == douyinBar);
+    if (!wasMounted) gGlassHostWasVisible = NO;
+
     // 作为子视图挂在抖音底栏内：显隐/透明度/位置全部随父视图继承。
     if (gBar.superview != douyinBar) [douyinBar addSubview:gBar];
     if (gPlusKey.superview != douyinBar) [douyinBar addSubview:gPlusKey];
@@ -861,6 +896,7 @@ static void DKGlassUpdate(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios(26.0
     DKGlassSyncItems(controller, buttons);
     DKGlassLayoutGlass(douyinBar);
     DKGlassSetDouyinContentVisible(douyinBar, buttons, NO);
+    DKGlassFadeInWhenHostAppears(douyinBar);
     // 放在最后：可视化的环绕轮廓要用 DKGlassLayoutGlass 刚算完的胶囊与圆键几何。
     DKAudioVisualizerLayout(douyinBar);
 }
@@ -876,6 +912,30 @@ void DKGlassTabBarRefresh(void) {
 %group DKGlassTabBarHooks
 
 %hook AWENormalModeTabBar
+
+- (void)setHidden:(BOOL)hidden {
+    BOOL changed = (self.hidden != hidden);
+    %orig;
+    if (hidden) {
+        gGlassHostWasVisible = NO;
+    } else if (changed) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (@available(iOS 26.0, *)) DKGlassUpdate(self);
+        });
+    }
+}
+
+- (void)setAlpha:(CGFloat)alpha {
+    BOOL changed = (fabs(self.alpha - alpha) > 0.01);
+    %orig;
+    if (alpha <= 0.01) {
+        gGlassHostWasVisible = NO;
+    } else if (changed) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (@available(iOS 26.0, *)) DKGlassUpdate(self);
+        });
+    }
+}
 
 - (void)layoutSubviews {
     %orig;

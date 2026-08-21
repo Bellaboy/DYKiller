@@ -57,6 +57,14 @@
 @interface AWEDPlayerProgressContainerView : UIView                // 进度条容器；底边压着一条纯黑细条
 @end
 
+// 清屏模式的页面容器与官方进度条。
+@interface AFDPureModePageContainerViewController : UIViewController
+@property (nonatomic, assign) BOOL isEnteringPureMode;
+@end
+
+@interface AWEFeedProgressSlider : UIView
+@end
+
 @interface AWEGradientView : UIView                                // HUD 可读性压暗渐变
 @end
 

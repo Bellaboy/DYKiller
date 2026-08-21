@@ -37,6 +37,8 @@ static const NSUInteger kDKFeedAncestorLimit = 8;
 
 // 撑高前的表高。挂在表上，既是还原依据，也是 HUD 的钉位目标。
 static char kDKFeedOriginalHeightKey;
+// 布局后补正的重入闸门；setFrame: 本身会再次触发布局。
+static char kDKFeedEnsureLayoutKey;
 // 所有撑高过的表（弱引用），供关闭开关时立即还原。多页并存时可能不止一张。
 static NSHashTable<UITableView *> *gStretchedTables = nil;
 
@@ -95,6 +97,10 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
         return CGRectNull;
     }
 
+    // 抖音在表进入窗口前会先写一次半成品高度。此时撑高会让视频链条先进入错误几何，
+    // 入窗后再回落，形成清屏切换时可见的短暂留白。
+    if (!table.window) return CGRectNull;
+
     CGFloat target = table.superview ? CGRectGetHeight(table.superview.bounds) : 0.0;
     CGFloat current = CGRectGetHeight(frame);
     // 容器不比来意的高度更高 → 这张表没被底栏压缩过（搜索页、好友聊天页就是这种），不在作用域内；
@@ -114,6 +120,20 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
     return frame;
 }
 
+static void DKVideoFeedTableEnsureAttachedHeight(UITableView *table) {
+    if (!table.window || !DKVideoFullscreenOn()) return;
+    if ([objc_getAssociatedObject(table, &kDKFeedEnsureLayoutKey) boolValue]) return;
+
+    CGRect adjusted = DKVideoFeedTableAdjustFrame(table, table.frame);
+    if (CGRectIsNull(adjusted) || CGRectEqualToRect(adjusted, table.frame)) return;
+
+    objc_setAssociatedObject(table, &kDKFeedEnsureLayoutKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    table.frame = adjusted;
+    objc_setAssociatedObject(table, &kDKFeedEnsureLayoutKey, nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 // 在写入时就改成满高：抖音把表高改回原值（如关闭评论区）的那一刻即被顶回去，
 // 不必等下一次布局。事后在 layoutSubviews 里改会留下「切一下才恢复」的空窗。
 %hook AWEFeedDataSafeTableView
@@ -125,6 +145,16 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
         return;
     }
     %orig(adjusted);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    DKVideoFeedTableEnsureAttachedHeight(self);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    DKVideoFeedTableEnsureAttachedHeight(self);
 }
 
 %end
