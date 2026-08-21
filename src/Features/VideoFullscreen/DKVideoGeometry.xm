@@ -84,8 +84,8 @@ CGFloat DKVideoViewportHeightForView(UIView *view) {
 
 #pragma mark - 视频容器的钉位目标
 
-// 拉满整屏只对比例达标的竖屏视频做：图文、横屏、低比例竖屏拉满会 aspect-fill 过裁。
-// 它们只需保持容器自然满幅，背景延伸到底栏交给 DKVideoPageChrome.xm 的 DKSyncBackdrop。
+// 主 feed 的视频容器统一拉满窗口，内容本身仍由抖音的比例策略决定是否留黑边或裁切。
+// 非主 feed 页面保留比例限制，避免详情/浮层等特殊播放器被错误撑成整屏。
 static BOOL DKMergeCanCoverScreen(AWEDPlayerViewController_Merge *merge) {
     if (![merge isKindOfClass:DKMergeClass()]) return NO;
 
@@ -106,7 +106,8 @@ static BOOL DKMergeCanCoverScreen(AWEDPlayerViewController_Merge *merge) {
 }
 
 // 视频容器的唯一几何规则：
-//   · 视频全屏 + 比例达标 → 钉到 Cell 满高，画面覆盖物理屏幕（好友聊天页比容器还高一个底栏）；
+//   · 主 feed 视频全屏 → 钉到窗口 viewport，画面层覆盖物理屏幕；
+//   · 其他页面视频全屏 + 比例达标 → 钉到 Cell 满高；
 //   · 其余情况           → 钉到容器自然满幅，也就是「不许被评论区缩放平移」。
 //
 // 第二条对横屏同样成立：抖音展开评论区时直接改 frame 把横屏缩小上移（实测
@@ -130,18 +131,16 @@ CGRect DKVideoContainerTargetFrame(UIView *view) {
     CGFloat height = CGRectGetHeight(parent.bounds);
     if (width <= 0.0 || height <= 0.0) return CGRectNull;
 
-    if (DKVideoFullscreenOn()
-        && DKMergeCanCoverScreen((AWEDPlayerViewController_Merge *)view.nextResponder)) {
+    if (DKVideoFullscreenOn() && DKVideoIsMainFeedView(view)) {
+        // 主 feed 的视频层始终铺到窗口 viewport。视频比例只影响视频内容的
+        // aspect-fit/fill，不再决定容器是否为 799pt；HUD 仍由
+        // DKFeedHUDAdjustFrame 钉回撑高前高度，二者在几何上解耦。
+        CGFloat viewportHeight = DKVideoViewportHeightForView(view);
+        if (viewportHeight > height) height = viewportHeight;
+    } else if (DKVideoFullscreenOn()
+               && DKMergeCanCoverScreen((AWEDPlayerViewController_Merge *)view.nextResponder)) {
         CGFloat full = DKFullCellHeight(view);
         if (full > height) height = full;
-
-        // 首页/朋友页的表父容器会为底栏保留约 75pt，视频不能把这个保留高度
-        // 当成最终高度。表和 Merge 共用窗口 viewport；HUD 仍由
-        // DKFeedHUDAdjustFrame 钉回原始高度，因此视频与控件在几何上解耦。
-        if (DKVideoIsMainFeedView(view)) {
-            CGFloat viewportHeight = DKVideoViewportHeightForView(view);
-            if (viewportHeight > height) height = viewportHeight;
-        }
     }
     return CGRectMake(0.0, 0.0, width, height);
 }

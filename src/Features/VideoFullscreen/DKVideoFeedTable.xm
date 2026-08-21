@@ -40,6 +40,8 @@ static const NSUInteger kDKFeedAncestorLimit = 8;
 static char kDKFeedOriginalHeightKey;
 // 所有撑高过的表（弱引用），供关闭开关时立即还原。多页并存时可能不止一张。
 static NSHashTable<UITableView *> *gStretchedTables = nil;
+// layoutSubviews 里主动补撑高时防止 table.frame 触发重入。
+static BOOL gFeedLayoutSyncing = NO;
 
 #pragma mark - 命中统计
 
@@ -138,8 +140,23 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
     return frame;
 }
 
-// 在写入时就改成满高：抖音把表高改回原值（如关闭评论区）的那一刻即被顶回去，
-// 不必等下一次布局。事后在 layoutSubviews 里改会留下「切一下才恢复」的空窗。
+// 有些主 feed 表在入窗前最后一次写入的是 799pt，入窗后不再触发 setFrame:。
+// 只靠 setFrame: 会让整条 cell 链永远停在底栏上方；在布局完成后补一次同一规则，
+// 与 setFrame: 共用 DKVideoFeedTableAdjustFrame，避免出现第二套几何算法。
+static void DKSyncFeedTableAfterLayout(UITableView *table) {
+    if (!table || gFeedLayoutSyncing || !table.window) return;
+
+    CGRect current = table.frame;
+    CGRect adjusted = DKVideoFeedTableAdjustFrame(table, current);
+    if (CGRectIsNull(adjusted) || DKRectsClose(current, adjusted)) return;
+
+    gFeedLayoutSyncing = YES;
+    table.frame = adjusted;
+    gFeedLayoutSyncing = NO;
+}
+
+// 在写入时就改成满高；如果入窗前的最后一次写入没有机会再次经过 setFrame:，
+// layoutSubviews 会调用同一规则补齐，避免表和视频容器短暂处于两套高度。
 %hook AWEFeedDataSafeTableView
 
 - (void)setFrame:(CGRect)frame {
@@ -149,6 +166,11 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
         return;
     }
     %orig(adjusted);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    DKSyncFeedTableAfterLayout(self);
 }
 
 %end
@@ -162,6 +184,11 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
         return;
     }
     %orig(adjusted);
+}
+
+- (void)layoutSubviews {
+    %orig;
+    DKSyncFeedTableAfterLayout(self);
 }
 
 %end
