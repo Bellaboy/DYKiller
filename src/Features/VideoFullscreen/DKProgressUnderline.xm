@@ -287,38 +287,6 @@ static void DKRestoreUnderline(UIView *view) {
 
 %end
 
-%hook AWEFeedProgressSlider
-
-- (void)setAlpha:(CGFloat)alpha {
-    UIView *slider = (UIView *)self;
-    BOOL active = DKPureModeActiveForView(slider);
-    if (active) {
-        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_slider_visibility", @{
-            @"requested_alpha": @(round(alpha * 100.0) / 100.0),
-            @"applied_alpha": @1.0,
-            @"hidden": @(slider.hidden),
-            @"bounds_height": @(round(CGRectGetHeight(slider.bounds) * 2.0) / 2.0),
-        });
-    }
-    %orig(active ? 1.0 : alpha);
-}
-
-- (void)setHidden:(BOOL)hidden {
-    UIView *slider = (UIView *)self;
-    BOOL active = DKPureModeActiveForView(slider);
-    if (active) {
-        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_slider_visibility", @{
-            @"requested_hidden": @(hidden),
-            @"applied_hidden": @NO,
-            @"alpha": @(round(slider.alpha * 100.0) / 100.0),
-            @"bounds_height": @(round(CGRectGetHeight(slider.bounds) * 2.0) / 2.0),
-        });
-    }
-    %orig(active ? NO : hidden);
-}
-
-%end
-
 %ctor {
     gLiftedProgressViews = [NSHashTable weakObjectsHashTable];
     DKVideoFullscreenRegisterRestore(DKRestoreAllProgressLifts);

@@ -62,9 +62,6 @@
 @property (nonatomic, assign) BOOL isEnteringPureMode;
 @end
 
-@interface AWEFeedProgressSlider : UIView
-@end
-
 @interface AWEGradientView : UIView                                // HUD 可读性压暗渐变
 @end
 

@@ -31,6 +31,13 @@ BOOL DKCommentFreezeOn(void);
 /// 写入拦截、两处重钉与调试探针共用这一个判据。
 CGRect DKVideoContainerTargetFrame(UIView *view);
 
+/// 当前视频所在正常窗口的 viewport 高度。
+/// 主 feed 的视频表与 Merge 容器必须共用这一高度，避免视频继续使用底栏预留高度。
+CGFloat DKVideoViewportHeightForView(UIView *view);
+
+/// 是否属于首页/朋友页的主 feed 表。详情、搜索和聊天页不走主 feed 撑高规则。
+BOOL DKVideoIsMainFeedView(UIView *view);
+
 /// 两个矩形是否已经一致（容差覆盖 @3x 亚像素漂移）。判「要不要改写」与「达没达标」同一把尺子。
 BOOL DKRectsClose(CGRect lhs, CGRect rhs);
 

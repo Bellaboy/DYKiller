@@ -17,6 +17,7 @@
 
 #import "DouyinHeaders.h"
 #import "DKVideoFullscreen.h"
+#import "DKVideoFeedTable.h"
 #import "DKGlassGuard.h"
 #import "DKKeys.h"
 #import "DKSettings.h"
@@ -59,6 +60,26 @@ static Class DKPlayInteractionClass(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{ cls = NSClassFromString(@"AWEPlayInteractionViewController"); });
     return cls;
+}
+
+BOOL DKVideoIsMainFeedView(UIView *view) {
+    if (!view) return NO;
+
+    UIView *table = [view isKindOfClass:UITableView.class]
+        ? view
+        : DKFeedTableForView(view);
+    Class feedClass = NSClassFromString(@"AWEFeedTableView");
+    return table && feedClass && [table isKindOfClass:feedClass];
+}
+
+CGFloat DKVideoViewportHeightForView(UIView *view) {
+    UIWindow *window = view.window;
+    UIView *coordinateView = view.superview ?: view;
+    if (!window || window.windowLevel != UIWindowLevelNormal || !coordinateView) return 0.0;
+
+    CGRect viewport = [window convertRect:window.bounds toView:coordinateView];
+    CGFloat height = CGRectGetHeight(viewport);
+    return isfinite(height) && height > 0.0 ? height : 0.0;
 }
 
 #pragma mark - 视频容器的钉位目标
@@ -113,6 +134,14 @@ CGRect DKVideoContainerTargetFrame(UIView *view) {
         && DKMergeCanCoverScreen((AWEDPlayerViewController_Merge *)view.nextResponder)) {
         CGFloat full = DKFullCellHeight(view);
         if (full > height) height = full;
+
+        // 首页/朋友页的表父容器会为底栏保留约 75pt，视频不能把这个保留高度
+        // 当成最终高度。表和 Merge 共用窗口 viewport；HUD 仍由
+        // DKFeedHUDAdjustFrame 钉回原始高度，因此视频与控件在几何上解耦。
+        if (DKVideoIsMainFeedView(view)) {
+            CGFloat viewportHeight = DKVideoViewportHeightForView(view);
+            if (viewportHeight > height) height = viewportHeight;
+        }
     }
     return CGRectMake(0.0, 0.0, width, height);
 }

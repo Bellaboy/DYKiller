@@ -73,6 +73,7 @@ static NSDictionary *DKVideoContainerGeometryFields(UIView *view, CGRect target)
     CGRect frame = view.frame;
     NSMutableDictionary *fields = [@{
         @"window_attached": @(view.window != nil),
+        @"main_feed": @(DKVideoIsMainFeedView(view)),
         @"frame_x": @(round(CGRectGetMinX(frame) * 2.0) / 2.0),
         @"frame_y": @(round(CGRectGetMinY(frame) * 2.0) / 2.0),
         @"frame_width": @(round(CGRectGetWidth(frame) * 2.0) / 2.0),
@@ -81,6 +82,10 @@ static NSDictionary *DKVideoContainerGeometryFields(UIView *view, CGRect target)
     if (!CGRectIsNull(target)) {
         fields[@"target_width"] = @(round(CGRectGetWidth(target) * 2.0) / 2.0);
         fields[@"target_height"] = @(round(CGRectGetHeight(target) * 2.0) / 2.0);
+    }
+    if (view.superview) {
+        fields[@"parent_height"] = @(round(CGRectGetHeight(view.superview.bounds) * 2.0) / 2.0);
+        fields[@"viewport_height"] = @(round(DKVideoViewportHeightForView(view) * 2.0) / 2.0);
     }
     return fields;
 }

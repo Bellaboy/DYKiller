@@ -31,7 +31,7 @@
 
 // 覆盖 @3x 像素对齐带来的亚像素漂移。
 static const CGFloat kDKFeedTolerance = 0.5;
-// 表高至少要到容器的这个比例才认作「已排好、只差一个底栏」，排除布局早期的半成品尺寸。
+// 表高至少要到目标高度的这个比例才认作「已排好、只差一个底栏」，排除布局早期的半成品尺寸。
 static const CGFloat kDKFeedMinHeightRatio = 0.5;
 // 从 HUD 往上找视频表的最大层数（图文内容多两层容器，取 8 有余量）。
 static const NSUInteger kDKFeedAncestorLimit = 8;
@@ -108,6 +108,10 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
     }
 
     CGFloat target = table.superview ? CGRectGetHeight(table.superview.bounds) : 0.0;
+    CGFloat viewportHeight = DKVideoIsMainFeedView(table)
+        ? DKVideoViewportHeightForView(table)
+        : 0.0;
+    if (viewportHeight > target) target = viewportHeight;
     CGFloat current = CGRectGetHeight(frame);
     // 容器不比来意的高度更高 → 这张表没被底栏压缩过（搜索页、好友聊天页就是这种），不在作用域内；
     // 高度不到容器一半 → 布局早期的半成品，记下它会把 HUD 钉到错误的位置。
@@ -124,8 +128,11 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
     }
     DKRuntimeDiagnosticsObserveState(@"video.feed_table", @"stretched_after_window", @{
         @"window_attached": @YES,
+        @"main_feed": @(DKVideoIsMainFeedView(table)),
         @"current_height": @(round(current * 2.0) / 2.0),
         @"target_height": @(round(target * 2.0) / 2.0),
+        @"parent_height": @(round(CGRectGetHeight(table.superview.bounds) * 2.0) / 2.0),
+        @"viewport_height": @(round(viewportHeight * 2.0) / 2.0),
     });
     frame.size.height = target;
     return frame;
