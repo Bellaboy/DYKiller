@@ -24,6 +24,15 @@ static char kDKProgressLiftTransformKey;
 static NSHashTable<UIView *> *gLiftedProgressViews;
 static BOOL DKPureModeActiveForView(UIView *view);
 
+static Class DKPureModeControllerClass(void) {
+    static Class cls;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cls = NSClassFromString(@"AFDPureModePageContainerViewController");
+    });
+    return cls;
+}
+
 // 忽略已有 transform，读取抖音实际排版出的 identity frame。
 // 这样重复 layout 时不会把我们自己的抬升再次算进判断。
 static CGRect DKProgressIdentityFrame(UIView *view) {
@@ -112,7 +121,8 @@ static AFDPureModePageContainerViewController *DKPureModeControllerForView(UIVie
     for (UIView *cursor = view; cursor; cursor = cursor.superview) {
         UIResponder *responder = cursor.nextResponder;
         for (NSUInteger i = 0; responder && i < 4; i++, responder = responder.nextResponder) {
-            if ([responder isKindOfClass:AFDPureModePageContainerViewController.class]) {
+            Class controllerClass = DKPureModeControllerClass();
+            if (controllerClass && [responder isKindOfClass:controllerClass]) {
                 return (AFDPureModePageContainerViewController *)responder;
             }
         }
