@@ -21,7 +21,6 @@
 #import "DKKeys.h"
 #import "DKSettings.h"
 #import "DKUtils.h"
-#import "DKRuntimeDiagnostics.h"
 #import <math.h>
 
 // 高/宽达到此阈值才算「比例达标」，可以拉满整屏；低比例竖屏与横屏保持容器自然尺寸。
@@ -118,20 +117,6 @@ CGRect DKVideoContainerTargetFrame(UIView *view) {
     return CGRectMake(0.0, 0.0, width, height);
 }
 
-static void DKVideoContainerEnsureAttachedFrame(AWEDPlayerViewController_Merge *merge) {
-    UIView *view = merge.viewIfLoaded;
-    if (!view || !view.window) {
-        if (view) DKRuntimeDiagnosticsObserveState(@"video.container", @"pre_window_frame_passed", @{});
-        return;
-    }
-
-    CGRect target = DKVideoContainerTargetFrame(view);
-    if (CGRectIsNull(target) || DKRectsClose(view.frame, target)) return;
-
-    DKRuntimeDiagnosticsObserveState(@"video.container", @"attached_layout_reflow", @{});
-    view.frame = target;
-}
-
 BOOL DKRectsClose(CGRect lhs, CGRect rhs) {
     return fabs(CGRectGetMinX(lhs) - CGRectGetMinX(rhs)) <= kDKGeometryTolerance
         && fabs(CGRectGetMinY(lhs) - CGRectGetMinY(rhs)) <= kDKGeometryTolerance
@@ -181,15 +166,6 @@ static CGRect DKAdjustFrame(UIView *view, CGRect frame) {
         return;
     }
     %orig(adjusted);
-}
-
-%end
-
-%hook AWEDPlayerViewController_Merge
-
-- (void)viewDidLayoutSubviews {
-    %orig;
-    DKVideoContainerEnsureAttachedFrame(self);
 }
 
 %end

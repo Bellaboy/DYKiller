@@ -38,8 +38,6 @@ static const NSUInteger kDKFeedAncestorLimit = 8;
 
 // 撑高前的表高。挂在表上，既是还原依据，也是 HUD 的钉位目标。
 static char kDKFeedOriginalHeightKey;
-// 布局后补正的重入闸门；setFrame: 本身会再次触发布局。
-static char kDKFeedEnsureLayoutKey;
 // 所有撑高过的表（弱引用），供关闭开关时立即还原。多页并存时可能不止一张。
 static NSHashTable<UITableView *> *gStretchedTables = nil;
 
@@ -101,7 +99,11 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
     // 抖音在表进入窗口前会先写一次半成品高度。此时撑高会让视频链条先进入错误几何，
     // 入窗后再回落，形成清屏切换时可见的短暂留白。
     if (!table.window) {
-        DKRuntimeDiagnosticsObserveState(@"video.feed_table", @"pre_window_frame_passed", @{});
+        DKRuntimeDiagnosticsObserveState(@"video.feed_table", @"pre_window_frame_passed", @{
+            @"window_attached": @NO,
+            @"current_height": @(round(CGRectGetHeight(frame) * 2.0) / 2.0),
+            @"target_height": @(round(CGRectGetHeight(table.superview.bounds) * 2.0) / 2.0),
+        });
         return CGRectNull;
     }
 
@@ -120,23 +122,13 @@ CGRect DKVideoFeedTableAdjustFrame(UITableView *table, CGRect frame) {
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [gStretchedTables addObject:table];
     }
-    DKRuntimeDiagnosticsObserveState(@"video.feed_table", @"stretched_after_window", @{});
+    DKRuntimeDiagnosticsObserveState(@"video.feed_table", @"stretched_after_window", @{
+        @"window_attached": @YES,
+        @"current_height": @(round(current * 2.0) / 2.0),
+        @"target_height": @(round(target * 2.0) / 2.0),
+    });
     frame.size.height = target;
     return frame;
-}
-
-static void DKVideoFeedTableEnsureAttachedHeight(UITableView *table) {
-    if (!table.window || !DKVideoFullscreenOn()) return;
-    if ([objc_getAssociatedObject(table, &kDKFeedEnsureLayoutKey) boolValue]) return;
-
-    CGRect adjusted = DKVideoFeedTableAdjustFrame(table, table.frame);
-    if (CGRectIsNull(adjusted) || CGRectEqualToRect(adjusted, table.frame)) return;
-
-    objc_setAssociatedObject(table, &kDKFeedEnsureLayoutKey, @YES,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    table.frame = adjusted;
-    objc_setAssociatedObject(table, &kDKFeedEnsureLayoutKey, nil,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 // 在写入时就改成满高：抖音把表高改回原值（如关闭评论区）的那一刻即被顶回去，
@@ -150,16 +142,6 @@ static void DKVideoFeedTableEnsureAttachedHeight(UITableView *table) {
         return;
     }
     %orig(adjusted);
-}
-
-- (void)didMoveToWindow {
-    %orig;
-    DKVideoFeedTableEnsureAttachedHeight(self);
-}
-
-- (void)layoutSubviews {
-    %orig;
-    DKVideoFeedTableEnsureAttachedHeight(self);
 }
 
 %end

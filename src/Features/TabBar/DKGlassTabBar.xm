@@ -55,8 +55,7 @@ static const CGFloat kDKPlatterFallbackInset = 21.0;
 
 static UITabBar *gBar = nil;
 static id gProxy = nil;
-// 原生底栏从隐藏/透明恢复时，玻璃子视图只淡入一次；不改写父容器的显隐状态。
-static BOOL gGlassHostWasVisible = NO;
+// 玻璃子视图自身的淡入状态；不改写原生底栏的显隐状态。
 static BOOL gGlassFadeInProgress = NO;
 // 每个 item 对应的 tab 序号（validIndex）。与 items 同序等长。
 static NSArray<NSNumber *> *gItemKinds = nil;
@@ -798,8 +797,10 @@ static BOOL DKGlassHostIsVisible(AWENormalModeTabBar *douyinBar) {
 }
 
 static void DKGlassPrepareFadeIn(void) API_AVAILABLE(ios(26.0)) {
-    if (!gBar || !gPlusKey || gGlassFadeInProgress) return;
-    gGlassHostWasVisible = NO;
+    if (!gBar || !gPlusKey) return;
+    gGlassFadeInProgress = NO;
+    [gBar.layer removeAllAnimations];
+    [gPlusKey.layer removeAllAnimations];
     [UIView performWithoutAnimation:^{
         gBar.alpha = 0.0;
         gPlusKey.alpha = 0.0;
@@ -809,14 +810,16 @@ static void DKGlassPrepareFadeIn(void) API_AVAILABLE(ios(26.0)) {
 static void DKGlassFadeInWhenHostAppears(AWENormalModeTabBar *douyinBar)
     API_AVAILABLE(ios(26.0)) {
     if (!gBar || !gPlusKey || !DKGlassHostIsVisible(douyinBar)) {
-        gGlassHostWasVisible = NO;
-        if (gBar) DKRuntimeDiagnosticsObserveState(@"tabbar.glass", @"host_not_visible", @{});
+        if (gBar) {
+            DKRuntimeDiagnosticsObserveState(@"tabbar.glass", @"host_not_visible", @{});
+            DKGlassPrepareFadeIn();
+        }
         return;
     }
 
-    if (gGlassHostWasVisible || gGlassFadeInProgress) return;
+    DKRuntimeDiagnosticsObserveState(@"tabbar.glass", @"host_visible", @{});
+    if (gGlassFadeInProgress || (gBar.alpha > 0.99 && gPlusKey.alpha > 0.99)) return;
     gGlassFadeInProgress = YES;
-    gGlassHostWasVisible = YES;
     DKRuntimeDiagnosticsRecordEvent(@"tabbar.glass", @"fade_in_started", @{});
 
     [UIView animateWithDuration:0.18
@@ -826,9 +829,12 @@ static void DKGlassFadeInWhenHostAppears(AWENormalModeTabBar *douyinBar)
                      animations:^{
         gBar.alpha = 1.0;
         gPlusKey.alpha = 1.0;
-    } completion:^(__unused BOOL finished) {
+    } completion:^(BOOL finished) {
         gGlassFadeInProgress = NO;
-        gGlassHostWasVisible = DKGlassHostIsVisible(douyinBar);
+        DKRuntimeDiagnosticsRecordEvent(@"tabbar.glass", @"fade_in_completed", @{
+            @"finished": @(finished),
+            @"host_visible": @(DKGlassHostIsVisible(douyinBar)),
+        });
     }];
 }
 
@@ -841,7 +847,6 @@ static void DKGlassUpdate(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios(26.0
     // 旧实例的按钮若停在 opacity=0，它再次出现时就是一条空底栏。
     AWENormalModeTabBar *previousBar = gDouyinBar;
     if (previousBar != douyinBar) {
-        gGlassHostWasVisible = NO;
         gGlassFadeInProgress = NO;
     }
     if (previousBar && previousBar != douyinBar && gBar) {
@@ -852,7 +857,6 @@ static void DKGlassUpdate(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios(26.0
 
     NSArray *buttons = DKGlassValue(douyinBar, @"tabBarButtons");
     if (!DKGlassTabBarEnabled()) {
-        gGlassHostWasVisible = NO;
         gGlassFadeInProgress = NO;
         if (!gBar) return;
         DKGlassSetDouyinContentVisible(douyinBar, buttons, YES);
@@ -895,8 +899,7 @@ static void DKGlassUpdate(AWENormalModeTabBar *douyinBar) API_AVAILABLE(ios(26.0
 
     BOOL wasMounted = (gBar.superview == douyinBar && gPlusKey.superview == douyinBar);
     if (!wasMounted) {
-        gGlassHostWasVisible = NO;
-        gGlassFadeInProgress = NO;
+        DKGlassPrepareFadeIn();
     }
 
     // 作为子视图挂在抖音底栏内：显隐/透明度/位置全部随父视图继承。
@@ -935,9 +938,8 @@ void DKGlassTabBarRefresh(void) {
 
 - (void)setHidden:(BOOL)hidden {
     BOOL changed = (self.hidden != hidden);
-    if (changed && !hidden) DKGlassPrepareFadeIn();
+    if (changed) DKGlassPrepareFadeIn();
     if (hidden) {
-        gGlassHostWasVisible = NO;
         gGlassFadeInProgress = NO;
         [gBar.layer removeAllAnimations];
         [gPlusKey.layer removeAllAnimations];
@@ -951,9 +953,8 @@ void DKGlassTabBarRefresh(void) {
 - (void)setAlpha:(CGFloat)alpha {
     BOOL changed = (fabs(self.alpha - alpha) > 0.01);
     BOOL becameVisible = changed && alpha > 0.01 && self.alpha <= 0.01;
-    if (becameVisible) DKGlassPrepareFadeIn();
+    if (becameVisible || alpha <= 0.01) DKGlassPrepareFadeIn();
     if (alpha <= 0.01) {
-        gGlassHostWasVisible = NO;
         gGlassFadeInProgress = NO;
         [gBar.layer removeAllAnimations];
         [gPlusKey.layer removeAllAnimations];
@@ -968,8 +969,7 @@ void DKGlassTabBarRefresh(void) {
     BOOL hadWindow = (self.window != nil);
     %orig;
     if (!self.window) {
-        gGlassHostWasVisible = NO;
-        gGlassFadeInProgress = NO;
+        DKGlassPrepareFadeIn();
     } else if (!hadWindow) {
         if (@available(iOS 26.0, *)) {
         DKGlassPrepareFadeIn();

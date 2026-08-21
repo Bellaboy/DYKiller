@@ -12,6 +12,7 @@
 #import "DKVideoFullscreen.h"
 #import "DKVideoFeedTable.h"
 #import "DKUtils.h"
+#import "DKRuntimeDiagnostics.h"
 #import <objc/runtime.h>
 #import <math.h>
 
@@ -68,6 +69,22 @@ static BOOL DKMergeIsStretchedTarget(AWEDPlayerViewController_Merge *merge) {
 static NSUInteger gPinWillDisplay = 0;
 static NSUInteger gPinLayout = 0;
 
+static NSDictionary *DKVideoContainerGeometryFields(UIView *view, CGRect target) {
+    CGRect frame = view.frame;
+    NSMutableDictionary *fields = [@{
+        @"window_attached": @(view.window != nil),
+        @"frame_x": @(round(CGRectGetMinX(frame) * 2.0) / 2.0),
+        @"frame_y": @(round(CGRectGetMinY(frame) * 2.0) / 2.0),
+        @"frame_width": @(round(CGRectGetWidth(frame) * 2.0) / 2.0),
+        @"frame_height": @(round(CGRectGetHeight(frame) * 2.0) / 2.0),
+    } mutableCopy];
+    if (!CGRectIsNull(target)) {
+        fields[@"target_width"] = @(round(CGRectGetWidth(target) * 2.0) / 2.0);
+        fields[@"target_height"] = @(round(CGRectGetHeight(target) * 2.0) / 2.0);
+    }
+    return fields;
+}
+
 NSString *DKVideoContainerPinStats(void) {
     return [NSString stringWithFormat:@"willDisplay 重钉=%lu  布局后兜底=%lu",
             (unsigned long)gPinWillDisplay, (unsigned long)gPinLayout];
@@ -77,9 +94,24 @@ static BOOL DKPinMergeToTarget(UIViewController *merge) {
     UIView *view = merge.viewIfLoaded;
     if (!view) return NO;
 
-    CGRect target = DKVideoContainerTargetFrame(view);
-    if (CGRectIsNull(target) || DKRectsClose(view.frame, target)) return NO;
+    if (!view.window) {
+        DKRuntimeDiagnosticsObserveState(@"video.container", @"pre_window_frame_passed",
+                                         @{
+                                             @"window_attached": @NO,
+                                             @"frame_height": @(round(CGRectGetHeight(view.frame) * 2.0) / 2.0),
+                                         });
+        return NO;
+    }
 
+    CGRect target = DKVideoContainerTargetFrame(view);
+    if (CGRectIsNull(target)) return NO;
+
+    DKRuntimeDiagnosticsObserveState(@"video.container", @"layout_snapshot",
+                                     DKVideoContainerGeometryFields(view, target));
+    if (DKRectsClose(view.frame, target)) return NO;
+
+    DKRuntimeDiagnosticsRecordEvent(@"video.container", @"attached_layout_reflow",
+                                   DKVideoContainerGeometryFields(view, target));
     view.frame = target;
     return YES;
 }

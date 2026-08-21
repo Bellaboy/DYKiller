@@ -16,6 +16,8 @@
 
 // 覆盖 @3x 像素对齐与进度条收放时的亚像素漂移。
 static const CGFloat kDKUnderlineTolerance = 0.5;
+// 清屏时异常坐标会产生整屏级别的位移；超过根视图一半直接拒绝，等待下一次稳定布局。
+static const CGFloat kDKPureProgressMaxLiftRatio = 0.5;
 
 static char kDKUnderlineColorKey;
 static char kDKUnderlineOpaqueKey;
@@ -135,6 +137,39 @@ static BOOL DKPureModeActiveForView(UIView *view) {
     return controller && controller.viewIfLoaded.window && !controller.isEnteringPureMode;
 }
 
+static NSDictionary *DKProgressGeometryFields(UIView *progress, CGFloat lift, BOOL pureMode) {
+    NSMutableDictionary *fields = [@{
+        @"pure_mode": @(pureMode),
+        @"lift": @(round(lift * 2.0) / 2.0),
+        @"bounds_width": @(round(CGRectGetWidth(progress.bounds) * 2.0) / 2.0),
+        @"bounds_height": @(round(CGRectGetHeight(progress.bounds) * 2.0) / 2.0),
+        @"alpha": @(round(progress.alpha * 100.0) / 100.0),
+        @"hidden": @(progress.hidden),
+        @"transform_a": @(round(progress.transform.a * 1000.0) / 1000.0),
+        @"transform_b": @(round(progress.transform.b * 1000.0) / 1000.0),
+        @"transform_c": @(round(progress.transform.c * 1000.0) / 1000.0),
+        @"transform_d": @(round(progress.transform.d * 1000.0) / 1000.0),
+        @"transform_tx": @(round(progress.transform.tx * 2.0) / 2.0),
+        @"transform_ty": @(round(progress.transform.ty * 2.0) / 2.0),
+    } mutableCopy];
+
+    AFDPureModePageContainerViewController *controller = DKPureModeControllerForView(progress);
+    UIView *root = controller.viewIfLoaded;
+    UIView *parent = progress.superview;
+    if (!root || !parent || ![progress isDescendantOfView:root]) return fields;
+
+    CGRect identity = DKProgressIdentityFrame(progress);
+    CGRect inRoot = [parent convertRect:identity toView:root];
+    fields[@"root_width"] = @(round(CGRectGetWidth(root.bounds) * 2.0) / 2.0);
+    fields[@"root_height"] = @(round(CGRectGetHeight(root.bounds) * 2.0) / 2.0);
+    fields[@"safe_bottom"] = @(round(root.safeAreaInsets.bottom * 2.0) / 2.0);
+    fields[@"identity_y"] = @(round(CGRectGetMinY(identity) * 2.0) / 2.0);
+    fields[@"identity_height"] = @(round(CGRectGetHeight(identity) * 2.0) / 2.0);
+    fields[@"root_y"] = @(round(CGRectGetMinY(inRoot) * 2.0) / 2.0);
+    fields[@"root_bottom"] = @(round(CGRectGetMaxY(inRoot) * 2.0) / 2.0);
+    return fields;
+}
+
 // 清屏时仍只调整官方进度条容器；不扫描不稳定的控件树，也不并行安装第二套容器变换。
 static CGFloat DKPureModeProgressLift(UIView *progress) {
     if (!progress || !DKVideoFullscreenOn() || !DKPureModeActiveForView(progress)) return 0.0;
@@ -157,7 +192,34 @@ static CGFloat DKPureModeProgressLift(UIView *progress) {
 
     CGFloat targetMaxY = CGRectGetHeight(root.bounds) - root.safeAreaInsets.bottom - 84.0;
     CGFloat lift = CGRectGetMaxY(inRoot) - targetMaxY;
-    return lift > kDKUnderlineTolerance ? lift : 0.0;
+    if (!isfinite(lift) || lift <= kDKUnderlineTolerance) return 0.0;
+
+    CGFloat maximum = CGRectGetHeight(root.bounds) * kDKPureProgressMaxLiftRatio;
+    if (maximum <= 0.0 || lift > maximum) {
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_progress_rejected", @{
+            @"root_height": @(round(CGRectGetHeight(root.bounds) * 2.0) / 2.0),
+            @"root_bottom": @(round(CGRectGetMaxY(inRoot) * 2.0) / 2.0),
+            @"target_bottom": @(round(targetMaxY * 2.0) / 2.0),
+            @"lift": @(round(lift * 2.0) / 2.0),
+        });
+        return 0.0;
+    }
+    return lift;
+}
+
+static void DKUpdateProgressLayout(UIView *progress) {
+    AFDPureModePageContainerViewController *pureMode = DKPureModeControllerForView(progress);
+    BOOL pureActive = pureMode && DKPureModeActiveForView(progress);
+    CGFloat lift = pureMode ? DKPureModeProgressLift(progress)
+                            : DKProgressFullscreenLift(progress);
+
+    DKRuntimeDiagnosticsObserveState(@"video.progress", @"layout_snapshot",
+                                     DKProgressGeometryFields(progress, lift, pureActive));
+    if (lift > kDKUnderlineTolerance) {
+        DKApplyProgressLift(progress, lift);
+    } else {
+        DKRestoreProgressLift(progress);
+    }
 }
 
 // 签名：容器直属 + 普通 UIView + 满宽 + 极薄 + 底色不透明。
@@ -209,13 +271,7 @@ static void DKRestoreUnderline(UIView *view) {
 - (void)layoutSubviews {
     %orig;
 
-    AFDPureModePageContainerViewController *pureMode = DKPureModeControllerForView(self);
-    CGFloat lift = pureMode ? DKPureModeProgressLift(self) : DKProgressFullscreenLift(self);
-    if (lift > kDKUnderlineTolerance) {
-        DKApplyProgressLift(self, lift);
-    } else {
-        DKRestoreProgressLift(self);
-    }
+    DKUpdateProgressLayout(self);
 
     BOOL enabled = DKVideoFullscreenOn();
 
@@ -236,8 +292,13 @@ static void DKRestoreUnderline(UIView *view) {
 - (void)setAlpha:(CGFloat)alpha {
     UIView *slider = (UIView *)self;
     BOOL active = DKPureModeActiveForView(slider);
-    if (active && alpha <= 0.01) {
-        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_slider_hidden_by_alpha", @{});
+    if (active) {
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_slider_visibility", @{
+            @"requested_alpha": @(round(alpha * 100.0) / 100.0),
+            @"applied_alpha": @1.0,
+            @"hidden": @(slider.hidden),
+            @"bounds_height": @(round(CGRectGetHeight(slider.bounds) * 2.0) / 2.0),
+        });
     }
     %orig(active ? 1.0 : alpha);
 }
@@ -245,8 +306,13 @@ static void DKRestoreUnderline(UIView *view) {
 - (void)setHidden:(BOOL)hidden {
     UIView *slider = (UIView *)self;
     BOOL active = DKPureModeActiveForView(slider);
-    if (active && hidden) {
-        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_slider_hidden", @{});
+    if (active) {
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_slider_visibility", @{
+            @"requested_hidden": @(hidden),
+            @"applied_hidden": @NO,
+            @"alpha": @(round(slider.alpha * 100.0) / 100.0),
+            @"bounds_height": @(round(CGRectGetHeight(slider.bounds) * 2.0) / 2.0),
+        });
     }
     %orig(active ? NO : hidden);
 }
