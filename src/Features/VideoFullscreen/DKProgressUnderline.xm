@@ -137,6 +137,137 @@ static BOOL DKPureModeActiveForView(UIView *view) {
     return controller && controller.viewIfLoaded.window && !controller.isEnteringPureMode;
 }
 
+static UICollectionView *DKPureModeCollectionForProgress(UIView *progress) {
+    for (UIView *cursor = progress; cursor; cursor = cursor.superview) {
+        if ([cursor isKindOfClass:UICollectionView.class]) {
+            return (UICollectionView *)cursor;
+        }
+    }
+    return nil;
+}
+
+static UICollectionViewCell *DKPureModeCellForProgress(UIView *progress) {
+    for (UIView *cursor = progress; cursor; cursor = cursor.superview) {
+        if ([cursor isKindOfClass:UICollectionViewCell.class]) {
+            return (UICollectionViewCell *)cursor;
+        }
+    }
+    return nil;
+}
+
+static CGFloat DKPureModePageDistance(UICollectionViewCell *cell,
+                                      UICollectionView *collection) {
+    if (!cell || !collection || CGRectGetWidth(cell.bounds) <= 1.0
+        || CGRectGetHeight(cell.bounds) <= 1.0) {
+        return CGFLOAT_MAX;
+    }
+
+    CGRect page = [cell convertRect:cell.bounds toView:collection];
+    CGPoint center = CGPointMake(
+        collection.contentOffset.x + CGRectGetMidX(collection.bounds),
+        collection.contentOffset.y + CGRectGetMidY(collection.bounds)
+    );
+    return hypot(CGRectGetMidX(page) - center.x, CGRectGetMidY(page) - center.y);
+}
+
+static UICollectionViewCell *DKPureModeCurrentCell(UICollectionView *collection) {
+    if (!collection) return nil;
+
+    UICollectionViewCell *current = nil;
+    CGFloat best = CGFLOAT_MAX;
+    for (UICollectionViewCell *candidate in collection.visibleCells) {
+        if (candidate.hidden || candidate.alpha <= 0.01) continue;
+        CGFloat distance = DKPureModePageDistance(candidate, collection);
+        if (distance < best) {
+            best = distance;
+            current = candidate;
+        }
+    }
+    return current;
+}
+
+// 清屏分页容器会同时保留当前页、上一页和预加载页。只用「在清屏根下面」会把它们全部
+// 当成当前进度条，转场时就会同时出现多个位置不同的官方容器。当前页以分页容器视口
+// 中心为准；过渡期间也只保留离中心最近的一页。
+static BOOL DKPureModeProgressIsCurrent(UIView *progress) {
+    UICollectionView *collection = DKPureModeCollectionForProgress(progress);
+    UICollectionViewCell *cell = DKPureModeCellForProgress(progress);
+    if (!collection || !cell || cell.hidden || cell.alpha <= 0.01) return NO;
+
+    return cell == DKPureModeCurrentCell(collection);
+}
+
+static NSDictionary *DKPureModePageFields(UIView *progress) {
+    UICollectionView *collection = DKPureModeCollectionForProgress(progress);
+    UICollectionViewCell *cell = DKPureModeCellForProgress(progress);
+    NSMutableDictionary *fields = [@{
+        @"page_collection_class": collection ? NSStringFromClass(collection.class) : @"(nil)",
+        @"page_cell_class": cell ? NSStringFromClass(cell.class) : @"(nil)",
+        @"page_is_current": @(DKPureModeProgressIsCurrent(progress)),
+        @"page_visible_cells": @(collection.visibleCells.count),
+    } mutableCopy];
+    if (collection) {
+        fields[@"page_offset_x"] = @(round(collection.contentOffset.x * 2.0) / 2.0);
+        fields[@"page_offset_y"] = @(round(collection.contentOffset.y * 2.0) / 2.0);
+        fields[@"page_bounds"] = NSStringFromCGRect(collection.bounds);
+        fields[@"page_current_cell_class"] = NSStringFromClass(DKPureModeCurrentCell(collection).class)
+            ?: @"(nil)";
+    }
+    if (cell) {
+        fields[@"page_cell_frame"] = NSStringFromCGRect([cell convertRect:cell.bounds toView:collection]);
+        fields[@"page_distance"] = @(round(DKPureModePageDistance(cell, collection) * 2.0) / 2.0);
+    }
+    return fields;
+}
+
+static UICollectionView *DKPureModeCollectionInRoot(UIView *root) {
+    if (!root) return nil;
+
+    NSString *className = NSStringFromClass(root.class);
+    if ([root isKindOfClass:UICollectionView.class]
+        && [className containsString:@"PureModePageCollectionView"]) {
+        return (UICollectionView *)root;
+    }
+
+    for (UIView *subview in root.subviews) {
+        UICollectionView *collection = DKPureModeCollectionInRoot(subview);
+        if (collection) return collection;
+    }
+    return nil;
+}
+
+// 进度条日志能证明控件实例在切换，但不能证明视频画面本身的宿主是否发生了留白。
+// 记录清屏根、分页视口和当前 cell 的几何，下一次可以直接区分「视频层跳变」与「分页转场留白」。
+static void DKObservePureModeRootLayout(UIView *root) {
+    UICollectionView *collection = DKPureModeCollectionInRoot(root);
+    if (!root || !collection) return;
+
+    UICollectionViewCell *current = DKPureModeCurrentCell(collection);
+    NSMutableDictionary *fields = [@{
+        @"root_class": NSStringFromClass(root.class) ?: @"?",
+        @"root_frame": NSStringFromCGRect(root.frame),
+        @"root_bounds": NSStringFromCGRect(root.bounds),
+        @"root_safe_top": @(round(root.safeAreaInsets.top * 2.0) / 2.0),
+        @"root_safe_bottom": @(round(root.safeAreaInsets.bottom * 2.0) / 2.0),
+        @"window_attached": @(root.window != nil),
+        @"collection_class": NSStringFromClass(collection.class) ?: @"?",
+        @"collection_frame": NSStringFromCGRect([collection convertRect:collection.bounds toView:root]),
+        @"collection_bounds": NSStringFromCGRect(collection.bounds),
+        @"content_offset_x": @(round(collection.contentOffset.x * 2.0) / 2.0),
+        @"content_offset_y": @(round(collection.contentOffset.y * 2.0) / 2.0),
+        @"content_size_width": @(round(collection.contentSize.width * 2.0) / 2.0),
+        @"content_size_height": @(round(collection.contentSize.height * 2.0) / 2.0),
+        @"visible_cell_count": @(collection.visibleCells.count),
+        @"current_cell_class": current ? NSStringFromClass(current.class) : @"(nil)",
+    } mutableCopy];
+    if (current) {
+        fields[@"current_cell_frame"] = NSStringFromCGRect([current convertRect:current.bounds toView:root]);
+        fields[@"current_page_distance"] = @(round(DKPureModePageDistance(current, collection) * 2.0) / 2.0);
+    }
+
+    DKRuntimeDiagnosticsObserveState(@"video.pure_page", @"layout_snapshot", fields);
+}
+
 static NSString *DKProgressOwnerChain(UIView *progress) {
     NSMutableArray<NSString *> *classes = [NSMutableArray array];
     for (UIView *cursor = progress; cursor && classes.count < 8; cursor = cursor.superview) {
@@ -181,6 +312,7 @@ static NSDictionary *DKProgressGeometryFields(UIView *progress, CGFloat lift, BO
         @"transform_tx": @(round(progress.transform.tx * 2.0) / 2.0),
         @"transform_ty": @(round(progress.transform.ty * 2.0) / 2.0),
     } mutableCopy];
+    if (pureMode) [fields addEntriesFromDictionary:DKPureModePageFields(progress)];
 
     AFDPureModePageContainerViewController *controller = DKPureModeControllerForView(progress);
     UIView *table = DKFeedTableForView(progress);
@@ -212,7 +344,9 @@ static CGFloat DKPureModeProgressLift(UIView *progress) {
     UIView *root = controller.viewIfLoaded;
     UIView *parent = progress.superview;
     if (!root || !parent || ![progress isDescendantOfView:root]) {
-        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_progress_outside_controller_tree", @{});
+        NSMutableDictionary *fields = [DKProgressGeometryFields(progress, 0.0, YES) mutableCopy];
+        fields[@"reason"] = @"outside_controller_tree";
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_progress_outside_controller_tree", fields);
         return 0.0;
     }
 
@@ -220,7 +354,14 @@ static CGFloat DKPureModeProgressLift(UIView *progress) {
     CGRect inRoot = [parent convertRect:identity toView:root];
     if (CGRectGetMinY(inRoot) < -CGRectGetHeight(root.bounds)
         || CGRectGetMaxY(inRoot) > CGRectGetHeight(root.bounds) * 1.5) {
-        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_progress_invalid_geometry", @{});
+        NSMutableDictionary *fields = [DKProgressGeometryFields(progress, 0.0, YES) mutableCopy];
+        fields[@"reason"] = @"root_out_of_range";
+        fields[@"root_height"] = @(round(CGRectGetHeight(root.bounds) * 2.0) / 2.0);
+        fields[@"identity_y"] = @(round(CGRectGetMinY(identity) * 2.0) / 2.0);
+        fields[@"identity_height"] = @(round(CGRectGetHeight(identity) * 2.0) / 2.0);
+        fields[@"root_y"] = @(round(CGRectGetMinY(inRoot) * 2.0) / 2.0);
+        fields[@"root_bottom"] = @(round(CGRectGetMaxY(inRoot) * 2.0) / 2.0);
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_progress_invalid_geometry", fields);
         return 0.0;
     }
 
@@ -230,12 +371,14 @@ static CGFloat DKPureModeProgressLift(UIView *progress) {
 
     CGFloat maximum = CGRectGetHeight(root.bounds) * kDKPureProgressMaxLiftRatio;
     if (maximum <= 0.0 || lift > maximum) {
-        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_progress_rejected", @{
+        NSMutableDictionary *fields = [DKProgressGeometryFields(progress, lift, YES) mutableCopy];
+        [fields addEntriesFromDictionary:@{
             @"root_height": @(round(CGRectGetHeight(root.bounds) * 2.0) / 2.0),
             @"root_bottom": @(round(CGRectGetMaxY(inRoot) * 2.0) / 2.0),
             @"target_bottom": @(round(targetMaxY * 2.0) / 2.0),
             @"lift": @(round(lift * 2.0) / 2.0),
-        });
+        }];
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_progress_rejected", fields);
         return 0.0;
     }
     return lift;
@@ -245,14 +388,22 @@ static void DKUpdateProgressLayout(UIView *progress) {
     AFDPureModePageContainerViewController *pureMode = DKPureModeControllerForView(progress);
     BOOL pureActive = pureMode && DKPureModeActiveForView(progress);
 
+    if (pureMode && !DKPureModeProgressIsCurrent(progress)) {
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_progress_not_current", DKPureModePageFields(progress));
+        DKRestoreProgressLift(progress);
+        return;
+    }
+
     // isEnteringPureMode 只表示转场尚未稳定。此时不要把已经应用的位移恢复为 0，
     // 否则进入清屏会先回到底部，根布局完成后又跳回目标位置。
     if (pureMode && !pureActive) {
-        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_transition_preserved", @{
+        NSMutableDictionary *fields = [@{
             @"instance_id": [NSString stringWithFormat:@"%p", progress],
             @"hidden": @(progress.hidden),
             @"transform_ty": @(round(progress.transform.ty * 2.0) / 2.0),
-        });
+        } mutableCopy];
+        [fields addEntriesFromDictionary:DKPureModePageFields(progress)];
+        DKRuntimeDiagnosticsObserveState(@"video.progress", @"pure_transition_preserved", fields);
         return;
     }
 
@@ -355,7 +506,9 @@ static void DKSyncPureModeProgressDescendants(UIView *root) {
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    DKSyncPureModeProgressDescendants(self.viewIfLoaded);
+    UIView *root = self.viewIfLoaded;
+    DKObservePureModeRootLayout(root);
+    DKSyncPureModeProgressDescendants(root);
 }
 
 %end
